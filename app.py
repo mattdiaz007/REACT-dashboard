@@ -16,6 +16,33 @@ from backend_client import load_backend_health
 import pandas as pd
 import streamlit as st
 
+def require_password() -> None:
+    if st.session_state.get("authenticated", False):
+        return
+
+    st.title("REACT Dashboard")
+    st.caption("Enter the dashboard password to continue.")
+
+    entered_password = st.text_input(
+        "Password",
+        type="password",
+    )
+
+    if st.button("Sign in", type="primary"):
+        try:
+            correct_password = str(st.secrets["DASHBOARD_PASSWORD"])
+        except Exception:
+            st.error("Dashboard password is not configured.")
+            st.stop()
+
+        if entered_password == correct_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    st.stop()
+
 st.markdown(
     """
     <style>
@@ -37,6 +64,8 @@ st.set_page_config(
     page_icon="📊",
     layout="wide",
 )
+
+require_password()
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
