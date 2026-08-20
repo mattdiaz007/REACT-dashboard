@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pandas as pd
+import streamlit as st
 
 
 LOCAL_TIMEZONE = "America/New_York"
@@ -105,8 +106,14 @@ def load_backend_health(use_mock: Optional[bool] = None) -> tuple[pd.DataFrame, 
     else:
         api_key = os.getenv("REACT_DASHBOARD_API_KEY", "").strip()
         if not api_key:
+            try:
+                api_key = str(st.secrets["REACT_DASHBOARD_API_KEY"]).strip()
+            except Exception:
+                api_key = ""
+
+        if not api_key:
             raise RuntimeError(
-                "REACT_DASHBOARD_API_KEY is not set in the environment."
+                "REACT_DASHBOARD_API_KEY is not configured."
             )
         records = _load_live(api_key)
         source = "live backend"
