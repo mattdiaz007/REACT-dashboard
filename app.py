@@ -1153,15 +1153,18 @@ def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str) -> None:
 
 
 def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFrame, data_mode: str) -> None:
-    """Render a pre-visit status screen for one participant."""
+    """Render a fast pre-visit status screen for one participant."""
     st.header("Participant Detail")
     st.caption(
-        "Pre-visit check for one participant: current device/backend health, "
-        "EMA completion, recent prompts, and decision history. Times are Eastern."
+        "Five-second pre-visit check: device syncing, check-ins, and prompt delivery. "
+        "Times are Eastern."
     )
 
     if data_mode == "Live":
-        st.success("LIVE DATA MODE — only live backend fields are displayed. Seed values are never substituted.")
+        st.success(
+            "LIVE DATA MODE — only live backend fields are displayed. "
+            "Seed values are never substituted."
+        )
     else:
         st.info("SEED DATA MODE — synthetic/mock data for testing and demonstration only.")
 
@@ -1192,8 +1195,8 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
         )
         st.code(load_error)
 
-    # Build a participant selector from backend identifiers first.  Keep user_id
-    # attached when the backend supplies it so analysis/EMA rows can be linked.
+    # Build participant options from backend identifiers first. Keep user_id
+    # attached when available so seed EMA/decision rows can be linked correctly.
     participant_options = []
     seen_option_keys = set()
 
@@ -1268,6 +1271,7 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
         participant_options,
         key=lambda option: option["label"].lower(),
     )
+
     selected_label = st.selectbox(
         "Choose participant",
         [option["label"] for option in participant_options],
@@ -1277,14 +1281,6 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
     )
     selected_participant_id = selected["participant_id"]
     selected_user_id = selected["user_id"]
-
-    if is_seed_source:
-        st.info(
-            "SEED DATA MODE — operational stale status is disabled. This page can "
-            "still be used to test the participant-detail workflow."
-        )
-    else:
-        st.success(f"LIVE OPERATIONAL DATA — source: {source_name}")
 
     # Filter backend/pipeline rows for the selected participant.
     participant_pipeline = pipeline_df.iloc[0:0].copy()
@@ -1297,8 +1293,12 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
             pipeline_df["user_id"].astype(str) == str(selected_user_id)
         ].copy()
 
-    # If a selected backend row did not carry user_id, recover it when possible.
-    if pd.isna(selected_user_id) and not participant_pipeline.empty and "user_id" in participant_pipeline.columns:
+    # Recover user_id when the selected backend row carries one.
+    if (
+        pd.isna(selected_user_id)
+        and not participant_pipeline.empty
+        and "user_id" in participant_pipeline.columns
+    ):
         linked_users = participant_pipeline["user_id"].dropna()
         if not linked_users.empty:
             selected_user_id = linked_users.iloc[0]
@@ -1314,23 +1314,43 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
     yesterday = (now_et - pd.Timedelta(days=1)).date()
     stale_cutoff = now_et - pd.Timedelta(hours=24)
 
-    last_sync = participant_pipeline["last_sync_at"].max() if "last_sync_at" in participant_pipeline else pd.NaT
-    last_push = participant_pipeline["push_sent_at"].max() if "push_sent_at" in participant_pipeline else pd.NaT
-    last_receipt = participant_pipeline["device_received_at"].max() if "device_received_at" in participant_pipeline else pd.NaT
-    last_backend_receipt = participant_pipeline["receipt_reported_at"].max() if "receipt_reported_at" in participant_pipeline else pd.NaT
+    last_sync = (
+        participant_pipeline["last_sync_at"].max()
+        if "last_sync_at" in participant_pipeline
+        else pd.NaT
+    )
+    last_push = (
+        participant_pipeline["push_sent_at"].max()
+        if "push_sent_at" in participant_pipeline
+        else pd.NaT
+    )
+    last_receipt = (
+        participant_pipeline["device_received_at"].max()
+        if "device_received_at" in participant_pipeline
+        else pd.NaT
+    )
+    last_backend_receipt = (
+        participant_pipeline["receipt_reported_at"].max()
+        if "receipt_reported_at" in participant_pipeline
+        else pd.NaT
+    )
 
     stale = False if is_seed_source else (pd.isna(last_sync) or last_sync < stale_cutoff)
 
-    # Evaluate delivery state from the participant's latest delivery event, not
-    # from independently aggregated max(push) and max(receipt) timestamps.
+    # Evaluate delivery state using the participant's latest delivery event.
     latest_delivery = None
     latest_event_waiting = False
     latest_event_error = False
+
     if not participant_pipeline.empty:
         event_sort_time = participant_pipeline["push_sent_at"].copy()
         event_sort_time = event_sort_time.fillna(participant_pipeline["decision_made_at"])
-        event_rows = participant_pipeline.assign(_event_sort_time=event_sort_time).sort_values(
-            "_event_sort_time", ascending=False, na_position="last"
+        event_rows = participant_pipeline.assign(
+            _event_sort_time=event_sort_time
+        ).sort_values(
+            "_event_sort_time",
+            ascending=False,
+            na_position="last",
         )
         latest_delivery = event_rows.iloc[0]
         latest_event_waiting = (
@@ -1339,42 +1359,20 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
         )
         latest_event_error = latest_delivery.get("pipeline_state") == "Error"
 
-    if latest_event_error:
-        overall_status = "Needs attention"
-    elif stale:
-        overall_status = "Needs attention"
-    elif latest_event_waiting:
-        overall_status = "Waiting for receipt"
-    elif pd.notna(last_sync) or pd.notna(last_receipt):
-        overall_status = "Healthy"
-    elif is_seed_source:
-        overall_status = "Seed data"
-    else:
-        overall_status = "No activity"
-
-    st.subheader(f"Status: {overall_status}")
-
-    status_columns = st.columns(4)
-    status_columns[0].metric("Last sync", format_pipeline_time(last_sync))
-    status_columns[1].metric("Last push", format_pipeline_time(last_push))
-    status_columns[2].metric("Last receipt", format_pipeline_time(last_receipt))
-    status_columns[3].metric(
-        "Operational status",
-        overall_status,
-        help="Stale is based on the latest live sync. Waiting is based on the latest delivery event.",
-    )
-    st.caption("All operational timestamps shown in US Eastern time (America/New_York).")
-
-    # Calculate participant EMA and decision metrics from the analysis/decision log.
+    # Calculate participant EMA/check-in metrics from seed analysis data only.
     today_rate = None
     yesterday_rate = None
     overall_response_rate = None
     prompts_sent = 0
+    today_completed = today_scheduled = 0
+    yesterday_completed = yesterday_scheduled = 0
 
     if not participant_log.empty:
         participant_log["local_date"] = participant_log["timestamp"].dt.date
         participant_log["ema_completed"] = (
-            participant_log["ema"].notna() if "ema" in participant_log.columns else False
+            participant_log["ema"].notna()
+            if "ema" in participant_log.columns
+            else False
         )
 
         def completion_rate_for(day):
@@ -1389,148 +1387,255 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
         yesterday_rate, yesterday_completed, yesterday_scheduled = completion_rate_for(yesterday)
         overall_response_rate = float(participant_log["ema_completed"].mean())
         prompts_sent = int(participant_log["send_prompt"].sum())
-    else:
-        today_completed = today_scheduled = 0
-        yesterday_completed = yesterday_scheduled = 0
 
-    study_columns = st.columns(4)
-    if data_mode == "Live":
-        study_columns[0].metric("Today's EMA", "Not live yet")
-        study_columns[1].metric("Yesterday's EMA", "Not live yet")
-        study_columns[2].metric("Overall EMA response", "Not live yet")
-        study_columns[3].metric("Prompts sent", "Not live yet")
-        st.caption(
-            "EMA and decision-engine fields are not yet supplied by the live backend. "
-            "Seed values are intentionally hidden in Live mode."
-        )
-    else:
-        study_columns[0].metric(
-            "Today's EMA",
-            f"{today_rate:.0%}" if today_rate is not None else "No rows",
-            help=f"{today_completed} completed of {today_scheduled} scheduled today.",
-        )
-        study_columns[1].metric(
-            "Yesterday's EMA",
-            f"{yesterday_rate:.0%}" if yesterday_rate is not None else "No rows",
-            help=f"{yesterday_completed} completed of {yesterday_scheduled} scheduled yesterday.",
-        )
-        study_columns[2].metric(
-            "Overall EMA response",
-            f"{overall_response_rate:.0%}" if overall_response_rate is not None else "Not available",
-        )
-        study_columns[3].metric("Prompts sent", prompts_sent if not participant_log.empty else "Not available")
-
-    st.markdown("#### Current issues")
-    issues = []
-    if not is_seed_source and stale:
-        issues.append("No live device sync has been recorded in the past 24 hours.")
-    if latest_event_waiting:
-        issues.append("The latest push is still waiting for a device receipt.")
+    # Five-second quick-look statuses.
     if latest_event_error:
-        issues.append("The latest delivery event is marked as an error.")
+        overall_status = "NEEDS ATTENTION"
+        overall_message = "A delivery error was recorded for this participant."
+    elif stale:
+        overall_status = "NEEDS ATTENTION"
+        overall_message = "The participant has not synced in the past 24 hours."
+    elif latest_event_waiting:
+        overall_status = "CHECK NEEDED"
+        overall_message = "The latest push is still waiting for a device receipt."
+    elif pd.notna(last_sync) or pd.notna(last_receipt):
+        overall_status = "ALL SYSTEMS OK"
+        overall_message = "No current operational issues were detected."
+    elif is_seed_source:
+        overall_status = "SEED DATA"
+        overall_message = "Synthetic operational data is displayed for testing."
+    else:
+        overall_status = "NO ACTIVITY"
+        overall_message = "No operational activity has been recorded."
+
+    if is_seed_source:
+        sync_status = "Demo"
+    elif stale:
+        sync_status = "Stale"
+    elif pd.notna(last_sync):
+        sync_status = "OK"
+    else:
+        sync_status = "Missing"
+
+    if latest_event_error:
+        prompt_status = "Error"
+    elif latest_event_waiting:
+        prompt_status = "Waiting"
+    elif pd.notna(last_receipt):
+        prompt_status = "OK"
+    elif pd.notna(last_push):
+        prompt_status = "No receipt"
+    else:
+        prompt_status = "No recent prompt"
+
+    if data_mode == "Live":
+        checkin_status = "Not live yet"
+        checkin_detail = "Live check-in feed is not connected yet"
+    elif today_rate is None:
+        checkin_status = "No rows"
+        checkin_detail = "No scheduled check-ins today"
+    elif today_rate >= 0.5:
+        checkin_status = "OK"
+        checkin_detail = f"{today_completed}/{today_scheduled} completed today"
+    else:
+        checkin_status = "Behind"
+        checkin_detail = f"{today_completed}/{today_scheduled} completed today"
+
+    # Overall status banner first: this is the primary five-second read.
+    if overall_status == "ALL SYSTEMS OK":
+        st.success(f"### 🟢 {overall_status}\n{overall_message}")
+    elif overall_status == "CHECK NEEDED":
+        st.warning(f"### 🟡 {overall_status}\n{overall_message}")
+    elif overall_status == "NEEDS ATTENTION":
+        st.error(f"### 🔴 {overall_status}\n{overall_message}")
+    else:
+        st.info(f"### {overall_status}\n{overall_message}")
+
+    st.markdown("### Current status")
+    quick_columns = st.columns(3)
+
+    quick_columns[0].metric(
+        "Device syncing",
+        sync_status,
+        help="A problem means no live sync has been recorded in the past 24 hours.",
+    )
+    quick_columns[0].caption(f"Last sync: {format_pipeline_time(last_sync)}")
+
+    quick_columns[1].metric(
+        "Check-ins",
+        checkin_status,
+        help=checkin_detail,
+    )
+    quick_columns[1].caption(checkin_detail)
+
+    quick_columns[2].metric(
+        "Prompts arriving",
+        prompt_status,
+        help="Based on whether the latest push reached the participant device.",
+    )
+    if pd.notna(last_receipt):
+        quick_columns[2].caption(f"Last receipt: {format_pipeline_time(last_receipt)}")
+    elif pd.notna(last_push):
+        quick_columns[2].caption(f"Last push: {format_pipeline_time(last_push)}")
+    else:
+        quick_columns[2].caption("No recent prompt activity")
+
+    actions = []
+
+    if not is_seed_source and stale:
+        actions.append(
+            "Check the participant's device connection and confirm that syncing "
+            "is restored before the visit ends."
+        )
+
+    if latest_event_waiting:
+        actions.append(
+            "Confirm the participant's device has network access and verify whether "
+            "the pending prompt arrives."
+        )
+
+    if latest_event_error:
+        actions.append(
+            "Review the latest delivery error and notify the technical team if the "
+            "problem persists."
+        )
+
     if yesterday_rate is not None and yesterday_rate < 0.5:
-        issues.append(f"Yesterday's EMA completion was {yesterday_rate:.0%}.")
+        actions.append(
+            f"Yesterday's check-in completion was {yesterday_rate:.0%}. "
+            "Confirm with the participant whether check-ins are being received."
+        )
 
-    if issues:
-        for issue in issues:
-            st.warning(issue)
-    else:
-        st.success("No current issues meet the dashboard's attention rules.")
+    if actions:
+        st.markdown("#### Staff action")
+        for action in actions:
+            st.warning(action)
 
-    st.divider()
-    st.subheader("Recent operational activity")
+    st.markdown("#### Latest activity")
+    activity_columns = st.columns(3)
+    activity_columns[0].metric("Last sync", format_pipeline_time(last_sync))
+    activity_columns[1].metric("Last push", format_pipeline_time(last_push))
+    activity_columns[2].metric("Last receipt", format_pipeline_time(last_receipt))
+    st.caption("Operational timestamps are shown in US Eastern time (America/New_York).")
 
-    if participant_pipeline.empty:
-        st.info("No backend operational records are available for this participant.")
-    else:
-        recent = participant_pipeline.copy()
-        recent["_event_sort_time"] = recent["decision_made_at"].fillna(recent["push_sent_at"])
-        recent = recent.sort_values("_event_sort_time", ascending=False, na_position="last").head(20)
+    with st.expander("Recent operational activity"):
+        if participant_pipeline.empty:
+            st.info("No backend operational records are available for this participant.")
+        else:
+            recent = participant_pipeline.copy()
+            recent["_event_sort_time"] = recent["decision_made_at"].fillna(
+                recent["push_sent_at"]
+            )
+            recent = recent.sort_values(
+                "_event_sort_time",
+                ascending=False,
+                na_position="last",
+            ).head(20)
 
-        recent_columns = [
-            column
+            recent_columns = [
+                column
+                for column in [
+                    "decision_made_at",
+                    "push_sent_at",
+                    "device_received_at",
+                    "receipt_reported_at",
+                    "end_to_end_seconds",
+                    "pipeline_state",
+                ]
+                if column in recent.columns
+            ]
+            recent_display = recent[recent_columns].copy()
+
             for column in [
                 "decision_made_at",
                 "push_sent_at",
                 "device_received_at",
                 "receipt_reported_at",
-                "end_to_end_seconds",
-                "pipeline_state",
+            ]:
+                if column in recent_display.columns:
+                    recent_display[column] = recent_display[column].apply(
+                        format_pipeline_time
+                    )
+
+            if "end_to_end_seconds" in recent_display.columns:
+                recent_display["end_to_end_seconds"] = recent_display[
+                    "end_to_end_seconds"
+                ].apply(format_latency)
+
+            recent_display = recent_display.rename(
+                columns={
+                    "decision_made_at": "Decision made",
+                    "push_sent_at": "Push sent",
+                    "device_received_at": "Device received",
+                    "receipt_reported_at": "Receipt reported",
+                    "end_to_end_seconds": "End-to-end",
+                    "pipeline_state": "Status",
+                }
+            )
+            st.dataframe(recent_display, use_container_width=True, hide_index=True)
+
+            if pd.notna(last_backend_receipt):
+                st.caption(
+                    "Latest backend acknowledgment: "
+                    f"{format_pipeline_time(last_backend_receipt)}"
+                )
+
+    with st.expander("Participant study history"):
+        if participant_log.empty:
+            if data_mode == "Live":
+                st.info(
+                    "Live decision/EMA history is not connected yet. Seed history is "
+                    "intentionally hidden while Live mode is selected."
+                )
+            else:
+                st.info(
+                    "No decision/EMA rows are linked to this participant in the current "
+                    "seed analysis source. Operational status above is still valid."
+                )
+        else:
+            if (
+                "decision_reason" in participant_log.columns
+                and not participant_log["decision_reason"].dropna().empty
+            ):
+                most_common_reason = participant_log["decision_reason"].mode().iloc[0]
+            else:
+                most_common_reason = "No reason recorded"
+
+            history_metrics = st.columns(4)
+            history_metrics[0].metric("Decision records", len(participant_log))
+            history_metrics[1].metric("Prompts in log", prompts_sent)
+            history_metrics[2].metric(
+                "Overall EMA response",
+                f"{overall_response_rate:.0%}"
+                if overall_response_rate is not None
+                else "Not available",
+            )
+            history_metrics[3].metric("Most common reason", most_common_reason)
+
+            preferred_history_columns = [
+                "timestamp",
+                "ema",
+                "observed_mssd",
+                "user_threshold",
+                "send_prompt",
+                "decision_reason",
             ]
-            if column in recent.columns
-        ]
-        recent_display = recent[recent_columns].copy()
+            history_columns = [
+                column
+                for column in preferred_history_columns
+                if column in participant_log.columns
+            ]
+            history_display = participant_log[history_columns].sort_values(
+                "timestamp",
+                ascending=False,
+            ).head(50).copy()
 
-        for column in [
-            "decision_made_at",
-            "push_sent_at",
-            "device_received_at",
-            "receipt_reported_at",
-        ]:
-            if column in recent_display.columns:
-                recent_display[column] = recent_display[column].apply(format_pipeline_time)
+            if "timestamp" in history_display.columns:
+                history_display["timestamp"] = history_display["timestamp"].apply(
+                    format_pipeline_time
+                )
 
-        if "end_to_end_seconds" in recent_display.columns:
-            recent_display["end_to_end_seconds"] = recent_display["end_to_end_seconds"].apply(format_latency)
-
-        recent_display = recent_display.rename(
-            columns={
-                "decision_made_at": "Decision made",
-                "push_sent_at": "Push sent",
-                "device_received_at": "Device received",
-                "receipt_reported_at": "Receipt reported",
-                "end_to_end_seconds": "End-to-end",
-                "pipeline_state": "Status",
-            }
-        )
-        st.dataframe(recent_display, use_container_width=True, hide_index=True)
-
-        if pd.notna(last_backend_receipt):
-            st.caption(f"Latest backend acknowledgment: {format_pipeline_time(last_backend_receipt)}")
-
-    st.divider()
-    st.subheader("Participant study history")
-
-    if participant_log.empty:
-        if data_mode == "Live":
-            st.info(
-                "Live decision/EMA history is not connected yet. Seed history is "
-                "intentionally hidden while Live mode is selected."
-            )
-        else:
-            st.info(
-                "No decision/EMA rows are linked to this participant in the current "
-                "seed analysis source. Operational status above is still valid."
-            )
-    else:
-        if "decision_reason" in participant_log.columns and not participant_log["decision_reason"].dropna().empty:
-            most_common_reason = participant_log["decision_reason"].mode().iloc[0]
-        else:
-            most_common_reason = "No reason recorded"
-
-        history_metrics = st.columns(3)
-        history_metrics[0].metric("Decision records", len(participant_log))
-        history_metrics[1].metric("Most common reason", most_common_reason)
-        history_metrics[2].metric("Prompts in log", prompts_sent)
-
-        preferred_history_columns = [
-            "timestamp",
-            "ema",
-            "observed_mssd",
-            "user_threshold",
-            "send_prompt",
-            "decision_reason",
-        ]
-        history_columns = [
-            column for column in preferred_history_columns if column in participant_log.columns
-        ]
-        history_display = participant_log[history_columns].sort_values(
-            "timestamp", ascending=False
-        ).head(50).copy()
-        if "timestamp" in history_display.columns:
-            history_display["timestamp"] = history_display["timestamp"].apply(format_pipeline_time)
-
-        st.dataframe(history_display, use_container_width=True, hide_index=True)
+            st.dataframe(history_display, use_container_width=True, hide_index=True)
 
 def render_decision_view(log_df: pd.DataFrame, summary_df: pd.DataFrame, user_table: pd.DataFrame) -> None:
     # Header
