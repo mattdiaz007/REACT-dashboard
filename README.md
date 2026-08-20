@@ -17,12 +17,12 @@ The feasibility dashboard reads from two live, read-only backend endpoints:
 The API key must be provided through an environment variable. Do not place the key directly in the source code.
 
 macOS/Linux:
-export REACT_DASHBOARD_API_KEY="<actual key here>"
+export REACT_DASHBOARD_API_KEY="<actual key>"
 export REACT_USE_MOCK_DATA="false"
 
 To run with live data:
 
-export REACT_DASHBOARD_API_KEY="<actual key here>"
+export REACT_DASHBOARD_API_KEY="<actual key>"
 streamlit cache clear
 streamlit run app.py
 
