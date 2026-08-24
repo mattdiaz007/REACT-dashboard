@@ -16,33 +16,6 @@ from backend_client import load_backend_health
 import pandas as pd
 import streamlit as st
 
-def require_password() -> None:
-    if st.session_state.get("authenticated", False):
-        return
-
-    st.title("REACT Dashboard")
-    st.caption("Enter the dashboard password to continue.")
-
-    entered_password = st.text_input(
-        "Password",
-        type="password",
-    )
-
-    if st.button("Sign in", type="primary"):
-        try:
-            correct_password = str(st.secrets["DASHBOARD_PASSWORD"])
-        except Exception:
-            st.error("Dashboard password is not configured.")
-            st.stop()
-
-        if entered_password == correct_password:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-
-    st.stop()
-
 st.markdown(
     """
     <style>
@@ -65,12 +38,13 @@ st.set_page_config(
     layout="wide",
 )
 
-require_password()
-
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-DEFAULT_LOG_PATH = DATA_DIR / "decision_log.csv"
-DEFAULT_SUMMARY_PATH = DATA_DIR / "decision_summary.csv"
+DEFAULT_LOG_JSON_PATH = DATA_DIR / "decision_log.json"
+DEFAULT_SUMMARY_JSON_PATH = DATA_DIR / "decision_summary.json"
+
+DEFAULT_LOG_CSV_PATH = DATA_DIR / "decision_log"
+DEFAULT_SUMMARY_CSV_PATH = DATA_DIR / "decision_summary"
 LOCAL_TIMEZONE = "America/New_York"
 
 
@@ -98,7 +72,7 @@ def validate_columns(
     required_columns: set[str],
     file_label: str,
 ) -> None:
-    """Stop the app with a clear error when a CSV is missing columns."""
+    """Stop the app with a clear error when an analysis file is missing columns."""
     missing_columns = required_columns - set(dataframe.columns)
 
     if missing_columns:
@@ -128,12 +102,26 @@ def convert_to_boolean(series: pd.Series) -> pd.Series:
 
 
 @st.cache_data
-def load_default_data(
-    log_path: str,
-    summary_path: str,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load and cache the two default CSV files."""
-    return pd.read_csv(log_path), pd.read_csv(summary_path)
+def load_default_data() -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Load bundled seed files, preferring JSON over CSV."""
+
+    if DEFAULT_LOG_JSON_PATH.exists() and DEFAULT_SUMMARY_JSON_PATH.exists():
+        return (
+            pd.read_json(DEFAULT_LOG_JSON_PATH),
+            pd.read_json(DEFAULT_SUMMARY_JSON_PATH),
+            "bundled seed JSON files",
+        )
+
+    if DEFAULT_LOG_CSV_PATH.exists() and DEFAULT_SUMMARY_CSV_PATH.exists():
+        return (
+            pd.read_csv(DEFAULT_LOG_CSV_PATH),
+            pd.read_csv(DEFAULT_SUMMARY_CSV_PATH),
+            "bundled seed CSV files",
+        )
+
+    raise FileNotFoundError(
+        "No bundled decision_log/decision_summary JSON or CSV pair was found."
+    )
 
 
 def clean_data(
@@ -141,8 +129,8 @@ def clean_data(
     summary_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Validate columns, normalize types, and sort the data."""
-    validate_columns(log_df, REQUIRED_LOG_COLUMNS, "decision_log.csv")
-    validate_columns(summary_df, REQUIRED_SUMMARY_COLUMNS, "decision_summary.csv")
+    validate_columns(log_df, REQUIRED_LOG_COLUMNS, "decision_log")
+    validate_columns(summary_df, REQUIRED_SUMMARY_COLUMNS, "decision_summary")
 
     log_df = log_df.copy()
     summary_df = summary_df.copy()
@@ -516,7 +504,7 @@ def render_feasibility_view(log_df: pd.DataFrame, data_mode: str) -> None:
 
     if not pipeline_metadata["timestamp_fields_present"]:
         st.info(
-            "Pipeline timestamp fields are not present in the current CSV. "
+            "Pipeline timestamp fields are not present in the current analysis source. "
             "This section will populate automatically when the necessary timestamp "
             "fields are included."
         )
@@ -812,7 +800,7 @@ def render_feasibility_view(log_df: pd.DataFrame, data_mode: str) -> None:
         disabled=True,
     )
     filter_columns[2].info(
-        "Metrics update automatically when uploaded CSVs use the supported columns."
+        "Metrics update automatically when uploaded analysis files use the supported columns."
     )
 
     total_scheduled = int(participant_df["scheduled_emas"].sum())
@@ -1507,28 +1495,24 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
     elif pd.notna(last_push):
         quick_columns[2].caption(f"Last push: {format_pipeline_time(last_push)}")
     else:
-        quick_columns[2].caption("No recent prompt activity")
+        quick_columns[2].caption("No prompt has been sent recently")
 
     actions = []
-
     if not is_seed_source and stale:
         actions.append(
             "Check the participant's device connection and confirm that syncing "
             "is restored before the visit ends."
         )
-
     if latest_event_waiting:
         actions.append(
             "Confirm the participant's device has network access and verify whether "
             "the pending prompt arrives."
         )
-
     if latest_event_error:
         actions.append(
             "Review the latest delivery error and notify the technical team if the "
             "problem persists."
         )
-
     if yesterday_rate is not None and yesterday_rate < 0.5:
         actions.append(
             f"Yesterday's check-in completion was {yesterday_rate:.0%}. "
@@ -1851,10 +1835,10 @@ def render_decision_view(log_df: pd.DataFrame, summary_df: pd.DataFrame, user_ta
 
     # Optional raw data
     with st.expander("Show raw input data"):
-        st.markdown("#### decision_log.csv")
+        st.markdown("#### decision_log")
         st.dataframe(log_df, use_container_width=True, hide_index=True)
 
-        st.markdown("#### decision_summary.csv")
+        st.markdown("#### decision_summary")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
 # Sidebar data selection
@@ -1878,35 +1862,42 @@ else:
 use_uploaded_files = False
 if data_mode == "Seed":
     use_uploaded_files = st.sidebar.toggle(
-        "Upload different seed CSV files",
+        "Upload different seed analysis files",
         value=False,
-        help="Use this to inspect a newer synthetic/analysis run.",
+        help="Supports JSON or CSV decision log and summary files.",
     )
 
 if use_uploaded_files:
-    uploaded_log = st.sidebar.file_uploader("Upload decision_log.csv", type="csv")
-    uploaded_summary = st.sidebar.file_uploader("Upload decision_summary.csv", type="csv")
-    if uploaded_log is None or uploaded_summary is None:
-        st.info("Upload both CSV files to continue.")
-        st.stop()
-    raw_log_df = pd.read_csv(uploaded_log)
-    raw_summary_df = pd.read_csv(uploaded_summary)
-else:
-    if not DEFAULT_LOG_PATH.exists() or not DEFAULT_SUMMARY_PATH.exists():
-        st.error(
-            "The bundled seed CSV files were not found. Create a folder named "
-            "`data` beside `app.py`, then place `decision_log.csv` and "
-            "`decision_summary.csv` inside it."
-        )
-        st.stop()
-    raw_log_df, raw_summary_df = load_default_data(
-        str(DEFAULT_LOG_PATH),
-        str(DEFAULT_SUMMARY_PATH),
+    uploaded_log = st.sidebar.file_uploader(
+        "Upload decision_log",
+        type=["json", "csv"],
+    )
+    uploaded_summary = st.sidebar.file_uploader(
+        "Upload decision_summary",
+        type=["json", "csv"],
     )
 
-decision_data_source = (
-    "uploaded seed analysis files" if use_uploaded_files else "bundled seed CSV files"
-)
+    if uploaded_log is None or uploaded_summary is None:
+        st.info("Upload both analysis files to continue.")
+        st.stop()
+
+    if uploaded_log.name.lower().endswith(".json"):
+        raw_log_df = pd.read_json(uploaded_log)
+    else:
+        raw_log_df = pd.read_csv(uploaded_log)
+
+    if uploaded_summary.name.lower().endswith(".json"):
+        raw_summary_df = pd.read_json(uploaded_summary)
+    else:
+        raw_summary_df = pd.read_csv(uploaded_summary)
+
+    decision_data_source = "uploaded seed analysis files"
+else:
+    try:
+        raw_log_df, raw_summary_df, decision_data_source = load_default_data()
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        st.stop()
 
 # Seed analysis files remain loaded so Seed mode can use them, but Live mode
 # renderers must never surface them as live values.
@@ -1927,7 +1918,7 @@ st.title("REACT Decision Dashboard")
 if data_mode == "Live":
     st.caption("GLOBAL MODE: LIVE — backend data only. Seed values are never substituted.")
 else:
-    st.caption(f"GLOBAL MODE: SEED — {decision_data_source}; mock operational data. Demo/testing only.")
+    st.caption(f"GLOBAL MODE: SEED — {decision_data_source}; mock operational data. (4 demo participants)")
 
 if selected_view == "Daily monitoring":
     render_daily_monitoring_view(log_df, data_mode)
