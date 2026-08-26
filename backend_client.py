@@ -87,6 +87,61 @@ def _load_live(api_key: str) -> list[dict[str, Any]]:
     return combined_rows
 
 
+
+def _classify_demo_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Identify obvious live test/demo records from backend metadata.
+
+    This is an interim safeguard until the backend supplies an explicit
+    participant-type field. Strong test markers currently include:
+    - reserved @example.invalid email addresses
+    - email local-parts beginning with test/demo
+    - simulated prompt message IDs beginning with PROMPT-SIM-
+    """
+    classified = frame.copy()
+
+    existing_demo = (
+        classified["is_demo"].fillna(False).astype(bool)
+        if "is_demo" in classified.columns
+        else pd.Series(False, index=classified.index, dtype=bool)
+    )
+
+    email = classified.get(
+        "email",
+        pd.Series("", index=classified.index, dtype="object"),
+    ).fillna("").astype(str).str.strip().str.lower()
+
+    message_id = classified.get(
+        "message_id",
+        pd.Series("", index=classified.index, dtype="object"),
+    ).fillna("").astype(str).str.strip().str.upper()
+
+    reserved_test_email = email.str.endswith("@example.invalid")
+    named_test_email = email.str.match(r"^(test|demo)([-+_.]|@)")
+    simulated_prompt = message_id.str.startswith("PROMPT-SIM-")
+
+    classified["is_demo"] = (
+        existing_demo
+        | reserved_test_email
+        | named_test_email
+        | simulated_prompt
+    )
+
+    reasons = []
+    for idx in classified.index:
+        row_reasons = []
+        if bool(existing_demo.loc[idx]):
+            row_reasons.append("backend flag")
+        if bool(reserved_test_email.loc[idx]):
+            row_reasons.append("reserved test email")
+        elif bool(named_test_email.loc[idx]):
+            row_reasons.append("test/demo email")
+        if bool(simulated_prompt.loc[idx]):
+            row_reasons.append("simulated prompt id")
+        reasons.append("; ".join(row_reasons))
+
+    classified["demo_reason"] = reasons
+    return classified
+
 def load_backend_health(use_mock: Optional[bool] = None) -> tuple[pd.DataFrame, str]:
     """Load either the live backend or seed/mock backend data explicitly.
 
@@ -122,6 +177,12 @@ def load_backend_health(use_mock: Optional[bool] = None) -> tuple[pd.DataFrame, 
     frame = pd.DataFrame(records)
     frame["data_source"] = source
     frame["is_seed_data"] = is_seed_data
+
+    if is_seed_data:
+        frame["is_demo"] = False
+        frame["demo_reason"] = ""
+    else:
+        frame = _classify_demo_rows(frame)
 
     timestamp_columns = [
         "last_sync_timestamp",

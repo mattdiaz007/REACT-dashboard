@@ -47,15 +47,16 @@ DEFAULT_LOG_CSV_PATH = DATA_DIR / "decision_log"
 DEFAULT_SUMMARY_CSV_PATH = DATA_DIR / "decision_summary"
 LOCAL_TIMEZONE = "America/New_York"
 
-# Live backend records that belong to team/demo devices rather than pilot participants.
-# Keep these separate from seed data: demo devices are still real live-backend records.
-DEMO_PARTICIPANTS = {
-    "430": "Demo device",
-}
+# Optional manual overrides for unusual team/test devices that do not carry
+# recognizable test metadata. Normally this can stay empty.
+DEMO_PARTICIPANT_OVERRIDES = set()
+
+# Runtime registry used only for display labels after automatic detection.
+DEMO_PARTICIPANTS = {}
 
 
 def add_demo_flags(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Label live backend rows that belong to known demo/test participants."""
+    """Use backend demo detection, with optional manual overrides as a fallback."""
     flagged = dataframe.copy()
 
     participant_column = first_existing_column(
@@ -69,10 +70,23 @@ def add_demo_flags(dataframe: pd.DataFrame) -> pd.DataFrame:
         return flagged
 
     participant_ids = flagged[participant_column].astype(str)
-    flagged["is_demo"] = participant_ids.isin(DEMO_PARTICIPANTS)
+
+    backend_demo = (
+        flagged["is_demo"].fillna(False).astype(bool)
+        if "is_demo" in flagged.columns
+        else pd.Series(False, index=flagged.index, dtype=bool)
+    )
+    manual_demo = participant_ids.isin(DEMO_PARTICIPANT_OVERRIDES)
+
+    flagged["is_demo"] = backend_demo | manual_demo
+
+    # Populate display registry from whatever the backend identified this run.
+    for participant_id in participant_ids[flagged["is_demo"]].unique():
+        DEMO_PARTICIPANTS[str(participant_id)] = "Demo device"
+
     flagged["participant_label"] = participant_ids.map(
         lambda participant_id: (
-            f"{participant_id} — {DEMO_PARTICIPANTS[participant_id]}"
+            f"{participant_id} — Demo device"
             if participant_id in DEMO_PARTICIPANTS
             else participant_id
         )
@@ -1956,12 +1970,12 @@ if data_mode == "Live":
         "Include demo/test devices",
         value=False,
         help=(
-            "Known team/demo devices are hidden from live participant counts, "
-            "alerts, and participant lists unless this is enabled."
+            "Live test/demo devices are detected automatically from backend metadata "
+            "and hidden from participant counts, alerts, and participant lists unless enabled."
         ),
     )
     if not include_demo_devices:
-        st.sidebar.caption("Demo/test devices are excluded from live monitoring.")
+        st.sidebar.caption("Automatically detected demo/test devices are excluded from live monitoring.")
 else:
     st.sidebar.info("SEED DATA — DEMO ONLY")
     include_demo_devices = True
