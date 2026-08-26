@@ -47,6 +47,49 @@ DEFAULT_LOG_CSV_PATH = DATA_DIR / "decision_log"
 DEFAULT_SUMMARY_CSV_PATH = DATA_DIR / "decision_summary"
 LOCAL_TIMEZONE = "America/New_York"
 
+# Live backend records that belong to team/demo devices rather than pilot participants.
+# Keep these separate from seed data: demo devices are still real live-backend records.
+DEMO_PARTICIPANTS = {
+    "430": "Demo device",
+}
+
+
+def add_demo_flags(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Label live backend rows that belong to known demo/test participants."""
+    flagged = dataframe.copy()
+
+    participant_column = first_existing_column(
+        flagged,
+        ["participant_id", "user_id"],
+    )
+
+    if participant_column is None:
+        flagged["is_demo"] = False
+        flagged["participant_label"] = ""
+        return flagged
+
+    participant_ids = flagged[participant_column].astype(str)
+    flagged["is_demo"] = participant_ids.isin(DEMO_PARTICIPANTS)
+    flagged["participant_label"] = participant_ids.map(
+        lambda participant_id: (
+            f"{participant_id} — {DEMO_PARTICIPANTS[participant_id]}"
+            if participant_id in DEMO_PARTICIPANTS
+            else participant_id
+        )
+    )
+    return flagged
+
+
+def filter_demo_participants(
+    dataframe: pd.DataFrame,
+    include_demo_devices: bool,
+) -> pd.DataFrame:
+    """Hide known demo/test devices from operational views when requested."""
+    flagged = add_demo_flags(dataframe)
+    if include_demo_devices:
+        return flagged
+    return flagged.loc[~flagged["is_demo"]].copy()
+
 
 def to_eastern(series: pd.Series) -> pd.Series:
     """Parse timestamps as UTC and convert them to US Eastern time."""
@@ -448,7 +491,7 @@ def load_pipeline_source(data_mode: str) -> tuple[pd.DataFrame, str]:
     use_mock = data_mode == "Seed"
     return load_backend_health(use_mock=use_mock)
 
-def render_feasibility_view(log_df: pd.DataFrame, data_mode: str) -> None:
+def render_feasibility_view(log_df: pd.DataFrame, data_mode: str, include_demo_devices: bool) -> None:
     """Render paper-ready feasibility results at cohort and participant levels."""
     st.header("Feasibility Results")
     st.caption(
@@ -466,6 +509,11 @@ def render_feasibility_view(log_df: pd.DataFrame, data_mode: str) -> None:
     try:
         pipeline_source_df, pipeline_source_name = load_pipeline_source(data_mode)
         pipeline_df, pipeline_metadata = build_pipeline_data(pipeline_source_df)
+        if data_mode == "Live":
+            pipeline_df = filter_demo_participants(
+                pipeline_df,
+                include_demo_devices=include_demo_devices,
+            )
         pipeline_load_error = None
     except Exception as exc:
         if data_mode == "Live":
@@ -646,6 +694,16 @@ def render_feasibility_view(log_df: pd.DataFrame, data_mode: str) -> None:
 
         st.markdown("#### Participant health")
         participant_health_display = participant_health.copy()
+        if "Participant" in participant_health_display.columns:
+            participant_health_display["Participant"] = (
+                participant_health_display["Participant"].astype(str).map(
+                    lambda participant_id: (
+                        f"{participant_id} — {DEMO_PARTICIPANTS[participant_id]}"
+                        if participant_id in DEMO_PARTICIPANTS
+                        else participant_id
+                    )
+                )
+            )
 
         timestamp_columns = [
             "Last sync",
@@ -773,6 +831,15 @@ def render_feasibility_view(log_df: pd.DataFrame, data_mode: str) -> None:
                 "pipeline_state": "Status",
             }
         )
+
+        if "Participant" in latency_display.columns:
+            latency_display["Participant"] = latency_display["Participant"].astype(str).map(
+                lambda participant_id: (
+                    f"{participant_id} — {DEMO_PARTICIPANTS[participant_id]}"
+                    if participant_id in DEMO_PARTICIPANTS
+                    else participant_id
+                )
+            )
 
         st.dataframe(
             latency_display,
@@ -931,7 +998,7 @@ def render_feasibility_view(log_df: pd.DataFrame, data_mode: str) -> None:
         )
 
 
-def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str) -> None:
+def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str, include_demo_devices: bool) -> None:
     """Render the single morning screen used to identify pilot issues quickly."""
     st.header("Daily Monitoring")
     st.caption(
@@ -947,6 +1014,11 @@ def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str) -> None:
     try:
         source_df, source_name = load_pipeline_source(data_mode)
         pipeline_df, _ = build_pipeline_data(source_df)
+        if data_mode == "Live":
+            pipeline_df = filter_demo_participants(
+                pipeline_df,
+                include_demo_devices=include_demo_devices,
+            )
         load_error = None
     except Exception as exc:
         if data_mode == "Live":
@@ -1068,8 +1140,13 @@ def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str) -> None:
             if row["waiting"]:
                 reasons.append("Push waiting for receipt")
             if reasons:
+                participant_value = str(row[participant_column])
                 attention_rows.append({
-                    "Participant": row[participant_column],
+                    "Participant": (
+                        f"{participant_value} — {DEMO_PARTICIPANTS[participant_value]}"
+                        if participant_value in DEMO_PARTICIPANTS
+                        else participant_value
+                    ),
                     "Reason": "; ".join(reasons),
                     "Last sync": row["last_sync"],
                     "Last push": row["last_push"],
@@ -1137,6 +1214,15 @@ def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str) -> None:
 
     recent_display = recent[recent_columns].copy()
 
+    if participant_column in recent_display.columns:
+        recent_display[participant_column] = recent_display[participant_column].astype(str).map(
+            lambda participant_id: (
+                f"{participant_id} — {DEMO_PARTICIPANTS[participant_id]}"
+                if participant_id in DEMO_PARTICIPANTS
+                else participant_id
+            )
+        )
+
     for column in [
         "decision_made_at",
         "push_sent_at",
@@ -1169,7 +1255,7 @@ def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str) -> None:
 
 
 
-def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFrame, data_mode: str) -> None:
+def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFrame, data_mode: str, include_demo_devices: bool) -> None:
     """Render a fast pre-visit status screen for one participant."""
     st.header("Participant Detail")
     st.caption(
@@ -1188,6 +1274,11 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
     try:
         source_df, source_name = load_pipeline_source(data_mode)
         pipeline_df, _ = build_pipeline_data(source_df)
+        if data_mode == "Live":
+            pipeline_df = filter_demo_participants(
+                pipeline_df,
+                include_demo_devices=include_demo_devices,
+            )
         load_error = None
     except Exception as exc:
         if data_mode == "Live":
@@ -1236,7 +1327,12 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
                     continue
                 seen_option_keys.add(key)
 
-                label = str(participant_id)
+                participant_id_text = str(participant_id)
+                label = (
+                    f"{participant_id_text} — {DEMO_PARTICIPANTS[participant_id_text]}"
+                    if participant_id_text in DEMO_PARTICIPANTS
+                    else participant_id_text
+                )
                 if pd.notna(user_id):
                     label += f" (user {user_id})"
 
@@ -1856,8 +1952,19 @@ data_mode = st.sidebar.radio(
 
 if data_mode == "Live":
     st.sidebar.success("LIVE DATA")
+    include_demo_devices = st.sidebar.toggle(
+        "Include demo/test devices",
+        value=False,
+        help=(
+            "Known team/demo devices are hidden from live participant counts, "
+            "alerts, and participant lists unless this is enabled."
+        ),
+    )
+    if not include_demo_devices:
+        st.sidebar.caption("Demo/test devices are excluded from live monitoring.")
 else:
     st.sidebar.info("SEED DATA — DEMO ONLY")
+    include_demo_devices = True
 
 use_uploaded_files = False
 if data_mode == "Seed":
@@ -1921,9 +2028,9 @@ else:
     st.caption(f"GLOBAL MODE: SEED — {decision_data_source}; mock operational data. (4 demo participants)")
 
 if selected_view == "Daily monitoring":
-    render_daily_monitoring_view(log_df, data_mode)
+    render_daily_monitoring_view(log_df, data_mode, include_demo_devices)
 elif selected_view == "Participant detail":
-    render_participant_detail_view(log_df, summary_df, data_mode)
+    render_participant_detail_view(log_df, summary_df, data_mode, include_demo_devices)
 elif selected_view == "Feasibility":
     if data_mode == "Live":
         st.header("Feasibility Results")
@@ -1932,7 +2039,7 @@ elif selected_view == "Feasibility":
             "the synthetic feasibility analysis. No seed values are shown in Live mode."
         )
     else:
-        render_feasibility_view(log_df, data_mode)
+        render_feasibility_view(log_df, data_mode, include_demo_devices)
 else:
     if data_mode == "Live":
         st.header("Decision Engine")
