@@ -78,11 +78,13 @@ def _load_live(api_key: str) -> list[dict[str, Any]]:
         event_keys.add(key)
         combined = participant_map.get(key, {}).copy()
         combined.update(event)
+        # Preserve raw event provenance before participant snapshots are merged.
+        combined["weekly_event"] = dict(event)
         combined_rows.append(combined)
 
     for key, row in participant_map.items():
         if key not in event_keys:
-            combined_rows.append(row)
+            combined_rows.append({**row, "weekly_event": None})
 
     return combined_rows
 

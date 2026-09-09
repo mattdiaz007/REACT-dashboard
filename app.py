@@ -5,7 +5,7 @@ From Terminal, inside the REACT-dashboard folder:
 
     python3 -m venv .venv
     source .venv/bin/activate
-    python -m pip install streamlit pandas
+    python -m pip install streamlit pandas reportlab
     streamlit run app.py
 """
 
@@ -385,6 +385,192 @@ def format_latency(value) -> str:
         return f"{value * 1000:.0f} ms"
 
     return f"{value:.1f} sec"
+
+
+def build_weekly_summary_pdf(summary: dict, participant_rows: pd.DataFrame) -> bytes:
+    """One Letter page with embedded fonts and measured text wrapping."""
+    from io import BytesIO
+    import reportlab
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    fonts = Path(reportlab.__file__).parent / "fonts"
+    for name, file_name in [("ReactRegular", "Vera.ttf"), ("ReactBold", "VeraBd.ttf")]:
+        if name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(name, str(fonts / file_name)))
+    output = BytesIO()
+    page = canvas.Canvas(output, pagesize=(612, 792))
+    page.setTitle("REACT weekly summary")
+    page.setAuthor("REACT")
+
+    def rect(x, y, width, height, color):
+        page.setFillColorRGB(*color)
+        page.rect(x, y, width, height, fill=1, stroke=0)
+
+    def label(x, y, value, size=9, bold=False, color=(.12, .18, .25), width=528):
+        font = "ReactBold" if bold else "ReactRegular"
+        value = str(value)
+        if pdfmetrics.stringWidth(value, font, size) > width:
+            while value and pdfmetrics.stringWidth(value + "...", font, size) > width:
+                value = value[:-1]
+            value += "..."
+        page.setFillColorRGB(*color)
+        page.setFont(font, size)
+        page.drawString(x, y, value)
+
+    rect(0, 684, 612, 108, (.12, .18, .25))
+    label(42, 746, "REACT WEEKLY SUMMARY", 18, True, (1, 1, 1), 385)
+    label(451, 746, summary["overall_status"].upper(), 9, True, (1, .78, .35), 125)
+    label(42, 721, summary["week_label"], 11, color=(.82, .88, .93))
+    label(42, 702, summary["source_label"], 8, color=(.82, .88, .93))
+    for i, (title, value, detail) in enumerate(summary["cards"]):
+        x = 42 + i * 179
+        rect(x, 594, 164, 70, (.96, .97, .98))
+        label(x + 10, 644, title.upper(), 7, True, width=144)
+        label(x + 10, 620, value, 18, True, width=144)
+        label(x + 10, 604, detail, 6.5, width=144)
+    label(42, 558, "PARTICIPANT SNAPSHOT", 10, True)
+    for x, title in [(42, "Participant"), (257, "Completion"), (359, "Delivery"), (478, "Status")]:
+        label(x, 525, title.upper(), 7, True, width=92)
+    y = 499
+    visible = participant_rows.head(6)
+    for i, (_, row) in enumerate(visible.iterrows()):
+        if i % 2 == 0:
+            rect(42, y - 9, 528, 24, (.96, .97, .98))
+        for x, key, width in [(48, "Participant", 198), (257, "Completion", 92),
+                              (359, "Delivery", 110), (478, "Health", 88)]:
+            label(x, y, row[key], 7.5, width=width)
+        y -= 27
+    if len(participant_rows) > len(visible):
+        label(48, y, f"{len(participant_rows) - len(visible)} additional IDs not shown; totals include all IDs.", 8)
+        y -= 24
+    y = min(290, y - 18)
+    label(42, y, "INTERPRETATION AND COVERAGE", 9, True)
+    y -= 18
+    for note in summary["notes"]:
+        line = ""
+        for word in note.split():
+            candidate = (line + " " + word).strip()
+            if line and pdfmetrics.stringWidth(candidate, "ReactRegular", 8) > 528:
+                label(42, y, line, 8)
+                y -= 11
+                line = word
+            else:
+                line = candidate
+        if line:
+            label(42, y, line, 8)
+            y -= 11
+        y -= 5
+    label(42, 42, summary["footer"], 6.5)
+    page.showPage()
+    page.save()
+    return output.getvalue()
+
+def build_weekly_summary_data(log_df, pipeline_df, week_start, data_mode, source_name):
+    """Observed weekly data only; snapshots never count as notification events."""
+    start = pd.Timestamp(week_start, tz=LOCAL_TIMEZONE)
+    end = start + pd.DateOffset(days=7)
+    now = pd.Timestamp.now(tz=LOCAL_TIMEZONE)
+    cutoff = min(end, now)
+
+    def identity(row):
+        for key in ["participant_id", "user_id"]:
+            value = row.get(key)
+            if pd.notna(value) and str(value).strip():
+                return str(value).strip()
+        return None
+
+    def stamp(row, names):
+        for name in names:
+            value = pd.to_datetime(row.get(name), errors="coerce", utc=True)
+            if pd.notna(value):
+                return value.tz_convert(LOCAL_TIMEZONE)
+        return pd.NaT
+
+    participants, active, events = set(), set(), []
+    unknown = 0
+    provenance = data_mode == "Seed" or "weekly_event" in pipeline_df.columns
+    for row in pipeline_df.to_dict("records"):
+        person = identity(row)
+        if person:
+            participants.add(person)
+        sync = stamp(row, ["last_sync_at", "last_sync_timestamp"])
+        if person and pd.notna(sync) and start <= sync < cutoff:
+            active.add(person)
+        raw = row.get("weekly_event") if data_mode == "Live" else row
+        if not isinstance(raw, dict):
+            continue
+        sent = stamp(raw, ["push_sent_at", "push_timestamp", "push_sent_timestamp"])
+        receipt = stamp(raw, ["device_received_at", "receipt_timestamp"])
+        decision = stamp(raw, ["decision_made_at", "decision_timestamp"])
+        in_week = any(pd.notna(t) and start <= t < cutoff for t in [sent, receipt, decision])
+        if person and in_week:
+            active.add(person)
+        message = raw.get("message_id")
+        # Only an explicit notification ID supports deduplication and matching.
+        if not person or pd.isna(message) or not str(message).strip():
+            unknown += int(in_week)
+            continue
+        events.append({"Participant": person, "message": str(message).strip(),
+                       "sent": sent, "receipt": receipt})
+
+    matched = []
+    unmatched = invalid = 0
+    if events:
+        frame = pd.DataFrame(events)
+        for column in ["sent", "receipt"]:
+            frame[column] = pd.to_datetime(frame[column], errors="coerce", utc=True)
+        for (person, message), group in frame.groupby(["Participant", "message"]):
+            sends = group["sent"].dropna().unique()
+            receipts = group["receipt"].dropna()
+            if len(sends) != 1:
+                if any(pd.notna(t) and start <= t < cutoff for t in list(sends) + receipts.tolist()):
+                    unmatched += 1
+                continue
+            sent = pd.Timestamp(sends[0])
+            if not start <= sent < cutoff:
+                continue
+            bad = bool((receipts < sent).any())
+            confirmed = bool(((receipts >= sent) & (receipts < cutoff)).any())
+            invalid += int(bad)
+            matched.append({"Participant": person, "confirmed": confirmed})
+    sent_total = len(matched)
+    delivered_total = sum(row["confirmed"] for row in matched)
+    rows = []
+    for person in sorted(participants):
+        notifications = [row for row in matched if row["Participant"] == person]
+        sent = len(notifications)
+        delivered = sum(row["confirmed"] for row in notifications)
+        rows.append({"Participant": person, "Completion": "Unavailable",
+                     "Delivery": f"{delivered}/{sent}" if sent else "No matched sends",
+                     "Health": ("Confirmed" if delivered == sent else "Unconfirmed") if sent else "Not assessed"})
+    participant_rows = pd.DataFrame(rows, columns=["Participant", "Completion", "Delivery", "Health"])
+    # No live schedule/response endpoint exists in this client. Decision-log rows
+    # alone do not establish scheduled assessments, including in seed mode.
+    notes = [
+        "EMA completion is unavailable: scheduled assessments and responses are not connected.",
+        f"Delivery: {delivered_total} of {sent_total} matched notifications sent this week have device confirmation by the reporting cutoff. Missing confirmation does not establish delivery failure.",
+        "Coverage: live results use up to 500 returned events; complete weekly history is not verified. Participant counts reflect returned IDs, not verified enrollment." if data_mode == "Live" else "SEED DATA: demonstration only; not pilot results.",
+        f"Data checks: {unknown} weekly rows lack a participant or message ID; {unmatched} notification IDs have missing or conflicting sends; {invalid} have receipts before send time. Unmatchable records are excluded.",
+        "Active means an observed sync, decision, send or receipt this week. Snapshot syncs do not establish complete activity history."
+    ]
+    if not provenance:
+        notes.append("Event provenance unavailable: replace backend_client.py with the accompanying version.")
+    demo_count = int(pipeline_df.loc[pipeline_df.get("is_demo", pd.Series(False, index=pipeline_df.index)).fillna(False).astype(bool)].apply(identity, axis=1).nunique()) if not pipeline_df.empty else 0
+    notes.append(f"Demo/test filter: {demo_count} flagged participant IDs included; unflagged test devices may remain.")
+    summary = {
+        "week_label": f"{start:%B %d} - {(end - pd.DateOffset(days=1)):%B %d, %Y}",
+        "source_label": f"{data_mode.upper()} DATA | {'Partial week' if now < end else 'Completed reporting week'} | Eastern time",
+        "overall_status": "Limited data" if data_mode == "Live" else "Seed demo",
+        "status_color": "1 0.78 0.35",
+        "cards": [("Participants observed", str(len(participants)), f"{len(active)} active in available data"),
+                  ("EMA completion", "Unavailable", "Schedule / responses not connected"),
+                  ("Confirmed delivery", f"{delivered_total / sent_total:.0%}" if sent_total else "Unavailable", f"{delivered_total} / {sent_total} matched sends")],
+        "notes": notes,
+        "footer": f"Generated {now:%Y-%m-%d %H:%M %Z} | Receipts counted before {cutoff:%Y-%m-%d %H:%M %Z} | IDs only",
+    }
+    return summary, participant_rows
 
 def build_feasibility_data(log_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """Calculate participant- and cohort-level feasibility measures.
@@ -1268,6 +1454,55 @@ def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str, include_d
     )
 
 
+def render_weekly_summary_view(log_df, data_mode, include_demo_devices):
+    """Render and export a faculty-ready one-page weekly summary."""
+    st.header("Weekly Summary")
+    st.caption("A one-page faculty update covering participants, completion, and delivery health.")
+    try:
+        source_df, source_name = load_pipeline_source(data_mode)
+        pipeline_df, _ = build_pipeline_data(source_df)
+        if data_mode == "Live":
+            pipeline_df = filter_demo_participants(pipeline_df, include_demo_devices)
+    except Exception as exc:
+        if data_mode == "Live":
+            st.error("Live backend data could not be loaded. Seed data was not substituted.")
+            st.code(str(exc))
+            return
+        source_name = "seed decision-log fallback"
+        pipeline_df, _ = build_pipeline_data(log_df)
+
+    today = pd.Timestamp.now(tz=LOCAL_TIMEZONE)
+    default_monday = (today - pd.DateOffset(days=today.weekday() + 7)).date()
+    selected_monday = st.date_input("Week beginning", value=default_monday,
+                                    help="Reports run Monday through Sunday in US Eastern time.")
+    selected_monday = selected_monday - pd.Timedelta(days=selected_monday.weekday())
+    summary, participant_rows = build_weekly_summary_data(log_df, pipeline_df, selected_monday, data_mode, source_name)
+
+    if data_mode == "Seed":
+        st.info("SEED DATA MODE — the export is clearly labeled as seed data.")
+    else:
+        st.success(
+            "LIVE DATA MODE — demo/test devices follow the dashboard's current filter."
+        )
+    st.subheader(summary["week_label"])
+    for column, (title, value, detail) in zip(st.columns(3), summary["cards"]):
+        column.metric(title, value)
+        column.caption(detail)
+    if data_mode == "Live":
+        st.warning("Live EMA completion is not connected yet; the PDF states this explicitly instead of substituting seed values.")
+    for note in summary["notes"]:
+        st.caption(note)
+    st.markdown("#### Participant snapshot")
+    st.caption("Delivery = confirmed / matched sends. PDF shows the first six IDs; totals cover all returned IDs.")
+    st.dataframe(participant_rows, use_container_width=True, hide_index=True)
+    pdf = build_weekly_summary_pdf(summary, participant_rows)
+    file_week = pd.Timestamp(selected_monday).strftime("%Y-%m-%d")
+    st.download_button("Download weekly summary PDF", data=pdf,
+                       file_name=f"REACT_weekly_summary_{file_week}.pdf",
+                       mime="application/pdf", type="primary")
+    st.caption("The one-page PDF includes coverage limits and missing-data explanations.")
+
+
 
 def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFrame, data_mode: str, include_demo_devices: bool) -> None:
     """Render a fast pre-visit status screen for one participant."""
@@ -2031,7 +2266,7 @@ user_table = build_consistency_table(log_df, summary_df)
 st.sidebar.divider()
 selected_view = st.sidebar.radio(
     "Dashboard view",
-    ["Daily monitoring", "Participant detail", "Decision engine", "Feasibility"],
+    ["Daily monitoring", "Weekly summary", "Participant detail", "Decision engine", "Feasibility"],
     index=0,
 )
 
@@ -2043,6 +2278,8 @@ else:
 
 if selected_view == "Daily monitoring":
     render_daily_monitoring_view(log_df, data_mode, include_demo_devices)
+elif selected_view == "Weekly summary":
+    render_weekly_summary_view(log_df, data_mode, include_demo_devices)
 elif selected_view == "Participant detail":
     render_participant_detail_view(log_df, summary_df, data_mode, include_demo_devices)
 elif selected_view == "Feasibility":

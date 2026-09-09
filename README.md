@@ -7,6 +7,11 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 streamlit run app.py
 
+The **Weekly summary** view creates a one-page PDF for faculty. Select the
+reporting week, review participants, completion, and delivery health, then
+download the forward-ready PDF. Live exports never substitute seed completion
+data when the live EMA feed is unavailable.
+
 ## Live backend setup
 
 The feasibility dashboard reads from two live, read-only backend endpoints:
