@@ -25,6 +25,10 @@ macOS/Linux:
 export REACT_DASHBOARD_API_KEY="<actual key>"
 export REACT_USE_MOCK_DATA="false"
 
+Windows PowerShell:
+$env:REACT_DASHBOARD_API_KEY = "<actual key>"
+$env:REACT_USE_MOCK_DATA = "false"
+
 To run with live data:
 
 export REACT_DASHBOARD_API_KEY="<actual key>"
@@ -41,4 +45,5 @@ REACT-dashboard/
 └── data/
     ├── decision_log.csv
     ├── decision_summary.csv
+    ├── hrv_5min_series.csv
     └── mock_backend_health.json

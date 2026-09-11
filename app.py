@@ -42,6 +42,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DEFAULT_LOG_JSON_PATH = DATA_DIR / "decision_log.json"
 DEFAULT_SUMMARY_JSON_PATH = DATA_DIR / "decision_summary.json"
+DEFAULT_HRV_CSV_PATH = DATA_DIR / "hrv_5min_series.csv"
 
 DEFAULT_LOG_CSV_PATH = DATA_DIR / "decision_log"
 DEFAULT_SUMMARY_CSV_PATH = DATA_DIR / "decision_summary"
@@ -179,6 +180,30 @@ def load_default_data() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     raise FileNotFoundError(
         "No bundled decision_log/decision_summary JSON or CSV pair was found."
     )
+
+
+@st.cache_data
+def load_default_hrv_data() -> pd.DataFrame:
+    """Load the bundled five-minute HRV series when it is available."""
+    if not DEFAULT_HRV_CSV_PATH.exists():
+        return pd.DataFrame()
+
+    hrv_df = pd.read_csv(DEFAULT_HRV_CSV_PATH)
+    required_columns = {"user_id", "interval_start", "rmssd"}
+    missing_columns = required_columns - set(hrv_df.columns)
+    if missing_columns:
+        raise ValueError(
+            "hrv_5min_series.csv is missing required columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    hrv_df = hrv_df.copy()
+    hrv_df["interval_start"] = to_eastern(hrv_df["interval_start"])
+    for column in ["rmssd", "baseline", "ratio", "count"]:
+        if column in hrv_df.columns:
+            hrv_df[column] = pd.to_numeric(hrv_df[column], errors="coerce")
+
+    return hrv_df.sort_values(["user_id", "interval_start"])
 
 
 def clean_data(
@@ -1625,6 +1650,22 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
                 }
             )
 
+        try:
+            hrv_df = load_default_hrv_data()
+        except ValueError as exc:
+            hrv_df = pd.DataFrame()
+            st.error(str(exc))
+
+        for user_id in hrv_df.get("user_id", pd.Series(dtype=object)).dropna().drop_duplicates():
+            if str(user_id) not in represented_users:
+                participant_options.append(
+                    {
+                        "label": f"User {user_id} (HRV data only)",
+                        "participant_id": pd.NA,
+                        "user_id": user_id,
+                    }
+                )
+
     if not participant_options:
         st.warning("No participants are available in the current data sources.")
         return
@@ -1995,6 +2036,109 @@ def render_participant_detail_view(log_df: pd.DataFrame, summary_df: pd.DataFram
 
             st.dataframe(history_display, use_container_width=True, hide_index=True)
 
+    st.markdown("#### Heart-rate variability")
+    try:
+        hrv_df = load_default_hrv_data()
+    except ValueError as exc:
+        hrv_df = pd.DataFrame()
+        st.error(str(exc))
+
+    if hrv_df.empty:
+        st.info("No HRV series is available. Add data/hrv_5min_series.csv to display it.")
+    elif pd.isna(selected_user_id):
+        st.info("HRV cannot be linked because this participant has no user ID.")
+    else:
+        user_hrv = hrv_df[hrv_df["user_id"].astype(str) == str(selected_user_id)].copy()
+        user_hrv = user_hrv.dropna(subset=["interval_start", "rmssd"])
+        if user_hrv.empty:
+            st.info(f"No HRV observations are available for {selected_user_id}.")
+        else:
+            hrv_chart = user_hrv.set_index("interval_start")[["rmssd"]].rename(
+                columns={"rmssd": "RMSSD (ms)"}
+            )
+            if "baseline" in user_hrv.columns and user_hrv["baseline"].notna().any():
+                hrv_chart["Baseline (ms)"] = user_hrv.set_index("interval_start")["baseline"]
+            st.line_chart(hrv_chart, height=300)
+
+            latest_hrv = user_hrv.iloc[-1]
+            hrv_metrics = st.columns(3)
+            hrv_metrics[0].metric("Latest RMSSD", f"{latest_hrv['rmssd']:.1f} ms")
+            hrv_metrics[1].metric(
+                "Latest HRV class",
+                str(latest_hrv.get("hrv_class") or "Not classified"),
+            )
+            hrv_metrics[2].metric("Intervals shown", f"{len(user_hrv):,}")
+            st.caption(
+                "HRV is RMSSD from five-minute intervals. The baseline and class come "
+                "from the supplied synthetic HRV export; this section is descriptive "
+                "and does not change decision-engine results."
+            )
+
+
+def render_hrv_summary_view(data_mode: str) -> None:
+    """Render the bundled HRV export as a selectable dashboard view."""
+    st.header("HRV Summary")
+    st.caption(
+        "Five-minute RMSSD trends from the supplied synthetic HRV export. "
+        "Times are Eastern."
+    )
+
+    if data_mode == "Live":
+        st.info(
+            "The current HRV export is bundled seed data. Switch the global data mode "
+            "to Seed to view this summary."
+        )
+        return
+
+    try:
+        hrv_df = load_default_hrv_data()
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    valid_hrv = hrv_df.dropna(subset=["user_id", "interval_start", "rmssd"])
+    if valid_hrv.empty:
+        st.info("No HRV observations are available in data/hrv_5min_series.csv.")
+        return
+
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("Participants", valid_hrv["user_id"].nunique())
+    metric_columns[1].metric("Valid intervals", len(valid_hrv))
+    metric_columns[2].metric("Average RMSSD", f"{valid_hrv['rmssd'].mean():.1f} ms")
+    metric_columns[3].metric("Peak RMSSD", f"{valid_hrv['rmssd'].max():.1f} ms")
+
+    class_counts = (
+        valid_hrv["hrv_class"].fillna("Unclassified").value_counts()
+        if "hrv_class" in valid_hrv.columns
+        else pd.Series(dtype=int)
+    )
+    left_column, right_column = st.columns([2, 1])
+    with left_column:
+        st.subheader("HRV class distribution")
+        if class_counts.empty:
+            st.info("No HRV classifications are present.")
+        else:
+            st.bar_chart(class_counts.rename("Intervals"), height=260)
+    with right_column:
+        selected_user = st.selectbox(
+            "Participant",
+            sorted(valid_hrv["user_id"].astype(str).unique()),
+        )
+
+    selected_hrv = valid_hrv[valid_hrv["user_id"].astype(str) == selected_user]
+    chart_data = selected_hrv.set_index("interval_start")[["rmssd"]].rename(
+        columns={"rmssd": "RMSSD (ms)"}
+    )
+    if "baseline" in selected_hrv.columns and selected_hrv["baseline"].notna().any():
+        chart_data["Baseline (ms)"] = selected_hrv.set_index("interval_start")["baseline"]
+
+    st.subheader(f"RMSSD over time: {selected_user}")
+    st.line_chart(chart_data, height=340)
+    st.caption(
+        "RMSSD is the primary HRV measure. Baseline and HRV class are carried through "
+        "from the source export and do not alter decision-engine results."
+    )
+
 def render_decision_view(log_df: pd.DataFrame, summary_df: pd.DataFrame, user_table: pd.DataFrame) -> None:
     # Header
     st.header("Decision Engine")
@@ -2266,7 +2410,7 @@ user_table = build_consistency_table(log_df, summary_df)
 st.sidebar.divider()
 selected_view = st.sidebar.radio(
     "Dashboard view",
-    ["Daily monitoring", "Weekly summary", "Participant detail", "Decision engine", "Feasibility"],
+    ["Daily monitoring", "Weekly summary", "Participant detail", "HRV summary", "Decision engine", "Feasibility"],
     index=0,
 )
 
@@ -2282,6 +2426,8 @@ elif selected_view == "Weekly summary":
     render_weekly_summary_view(log_df, data_mode, include_demo_devices)
 elif selected_view == "Participant detail":
     render_participant_detail_view(log_df, summary_df, data_mode, include_demo_devices)
+elif selected_view == "HRV summary":
+    render_hrv_summary_view(data_mode)
 elif selected_view == "Feasibility":
     if data_mode == "Live":
         st.header("Feasibility Results")
