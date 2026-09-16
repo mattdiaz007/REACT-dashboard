@@ -56,6 +56,8 @@ data when the live EMA feed is unavailable.
 
 The feasibility dashboard reads from two live, read-only backend endpoints:
 
+Backend: `https://react-backend-prod-8db300645555.herokuapp.com`
+
 - `/dashboard/participants/`
 - `/dashboard/latency-events/`
 

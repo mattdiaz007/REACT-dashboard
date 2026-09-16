@@ -17,14 +17,9 @@ LOCAL_TIMEZONE = "America/New_York"
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_MOCK_PATH = BASE_DIR / "data" / "mock_backend_health.json"
 
-PARTICIPANTS_URL = (
-    "https://healthygatorsportfan-ab9271b02569.herokuapp.com/"
-    "dashboard/participants/"
-)
-LATENCY_EVENTS_URL = (
-    "https://healthygatorsportfan-ab9271b02569.herokuapp.com/"
-    "dashboard/latency-events/?limit=500"
-)
+BACKEND_BASE_URL = "https://react-backend-prod-8db300645555.herokuapp.com"
+PARTICIPANTS_URL = f"{BACKEND_BASE_URL}/dashboard/participants/"
+LATENCY_EVENTS_URL = f"{BACKEND_BASE_URL}/dashboard/latency-events/?limit=500"
 
 
 def _read_json(url: str, api_key: str) -> Any:
