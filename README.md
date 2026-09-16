@@ -7,6 +7,46 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 streamlit run app.py
 
+## Host on Heroku
+
+The root `Procfile` starts Streamlit on Heroku's assigned port. Heroku installs
+the Python packages listed in `requirements.txt`.
+
+1. Sign in to the Heroku CLI with `heroku login`.
+2. From this directory, commit the deployment file:
+
+   ```sh
+   git add Procfile README.md
+   git commit -m "Configure Streamlit for Heroku"
+   ```
+
+3. Attach this repository to the existing `react-dashboard-prod` app with a
+   remote named for that app, then verify its destination:
+
+   ```sh
+   heroku git:remote -a react-dashboard-prod -r react-dashboard-prod
+   git remote -v
+   ```
+
+   The push URL should be `https://git.heroku.com/react-dashboard-prod.git`.
+4. For live backend data, set the API key as a Heroku config var:
+
+   ```sh
+   heroku config:set REACT_DASHBOARD_API_KEY="YOUR_API_KEY" -a react-dashboard-prod
+   ```
+
+5. Deploy and inspect the app:
+
+   ```sh
+   git push react-dashboard-prod main
+   heroku open -a react-dashboard-prod
+   heroku logs --tail -a react-dashboard-prod
+   ```
+
+Keep the API key out of Git. Without it, the live-data view cannot load;
+the dashboard can still use its bundled seed data. A Heroku app has a public
+URL, so arrange access control before exposing participant data.
+
 The **Weekly summary** view creates a one-page PDF for faculty. Select the
 reporting week, review participants, completion, and delivery health, then
 download the forward-ready PDF. Live exports never substitute seed completion
