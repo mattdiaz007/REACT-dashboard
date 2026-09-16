@@ -314,7 +314,11 @@ def build_pipeline_data(log_df: pd.DataFrame):
         if detected_column:
             pipeline[standard_name] = to_eastern(pipeline[detected_column])
         else:
-            pipeline[standard_name] = pd.NaT
+            pipeline[standard_name] = pd.Series(
+                pd.NaT,
+                index=pipeline.index,
+                dtype=f"datetime64[ns, {LOCAL_TIMEZONE}]",
+            )
 
     # the timestamp design defines these three primary latency stages.
     pipeline["backend_queue_seconds"] = (
