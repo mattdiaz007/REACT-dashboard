@@ -47,6 +47,24 @@ Keep the API key out of Git. Without it, the live-data view cannot load;
 the dashboard can still use its bundled seed data. A Heroku app has a public
 URL, so arrange access control before exposing participant data.
 
+## Automatic deployment from GitHub
+
+The `Python CI` workflow checks pushes to `main` and pull requests targeting
+`main`. Heroku can then deploy successful `main` pushes directly from GitHub:
+
+1. Commit `.github/workflows/python-ci.yml` and `.python-version`, then push
+   them to `origin main` so GitHub starts running the workflow.
+2. In the Heroku Dashboard, open `react-dashboard-prod` → **Deploy**. Choose
+   **GitHub** as the deployment method and connect
+   `mattdiaz007/REACT-dashboard`.
+3. Under **Automatic deploys**, select `main`, check **Wait for CI to pass
+   before deploy**, and enable automatic deploys.
+
+After setup, any collaborator's push or merge to `main` runs CI and deploys
+only after the checks pass. Pull requests run CI without deploying. Use the
+GitHub repository as the source of deployments instead of pushing to the
+Heroku Git remote once this integration is enabled.
+
 The **Weekly summary** view creates a one-page PDF for faculty. Select the
 reporting week, review participants, completion, and delivery health, then
 download the forward-ready PDF. Live exports never substitute seed completion
