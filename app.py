@@ -50,7 +50,12 @@ LOCAL_TIMEZONE = "America/New_York"
 
 # Optional manual overrides for unusual team/test devices that do not carry
 # recognizable test metadata. Normally this can stay empty.
-DEMO_PARTICIPANT_OVERRIDES = set()
+DEMO_PARTICIPANT_OVERRIDES = {
+    "496",
+    "497",
+    "530",
+    "532",
+}
 
 # Runtime registry used only for display labels after automatic detection.
 DEMO_PARTICIPANTS = {}

@@ -112,15 +112,29 @@ def _classify_demo_rows(frame: pd.DataFrame) -> pd.DataFrame:
         pd.Series("", index=classified.index, dtype="object"),
     ).fillna("").astype(str).str.strip().str.upper()
 
+    participant_id = classified.get(
+        "participant_id",
+        pd.Series("", index=classified.index, dtype="object"),
+    ).fillna("").astype(str).str.strip().str.lower()
+
+    user_id = classified.get(
+        "user_id",
+        pd.Series("", index=classified.index, dtype="object"),
+    ).fillna("").astype(str).str.strip().str.lower()
+
     reserved_test_email = email.str.endswith("@example.invalid")
     named_test_email = email.str.match(r"^(test|demo)([-+_.]|@)")
     simulated_prompt = message_id.str.startswith("PROMPT-SIM-")
+    named_test_participant = participant_id.str.match(r"^(test|demo)([-_:.]|$)")
+    named_test_user = user_id.str.match(r"^(test|demo)([-_:.]|$)")
 
     classified["is_demo"] = (
         existing_demo
         | reserved_test_email
         | named_test_email
         | simulated_prompt
+        | named_test_participant
+        | named_test_user
     )
 
     reasons = []
@@ -134,6 +148,10 @@ def _classify_demo_rows(frame: pd.DataFrame) -> pd.DataFrame:
             row_reasons.append("test/demo email")
         if bool(simulated_prompt.loc[idx]):
             row_reasons.append("simulated prompt id")
+        if bool(named_test_participant.loc[idx]):
+            row_reasons.append("test/demo participant id")
+        if bool(named_test_user.loc[idx]):
+            row_reasons.append("test/demo user id")
         reasons.append("; ".join(row_reasons))
 
     classified["demo_reason"] = reasons
