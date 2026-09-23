@@ -20,6 +20,9 @@ DEFAULT_MOCK_PATH = BASE_DIR / "data" / "mock_backend_health.json"
 BACKEND_BASE_URL = "https://react-backend-prod-8db300645555.herokuapp.com"
 PARTICIPANTS_URL = f"{BACKEND_BASE_URL}/dashboard/participants/"
 LATENCY_EVENTS_URL = f"{BACKEND_BASE_URL}/dashboard/latency-events/?limit=500"
+MONITOR_COHORT_URL = f"{BACKEND_BASE_URL}/api/monitor/cohort"
+MONITOR_ALERTS_URL = f"{BACKEND_BASE_URL}/api/monitor/alerts"
+MONITOR_GRID_URL = f"{BACKEND_BASE_URL}/api/monitor/grid"
 
 
 def _read_json(url: str, api_key: str) -> Any:
@@ -217,3 +220,150 @@ def load_backend_health(use_mock: Optional[bool] = None) -> tuple[pd.DataFrame, 
             )
 
     return frame, source
+
+@st.cache_data(ttl=60)
+def load_monitor_cohort(phase: str = "all") -> dict[str, Any]:
+    """Load the latest cohort monitoring snapshot."""
+    api_key = os.getenv("REACT_DASHBOARD_API_KEY", "").strip()
+
+    if not api_key:
+        try:
+            api_key = str(st.secrets["REACT_DASHBOARD_API_KEY"]).strip()
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        raise RuntimeError("REACT_DASHBOARD_API_KEY is not configured.")
+
+    return _read_json(
+        f"{MONITOR_COHORT_URL}?phase={phase}",
+        api_key,
+    )
+
+
+@st.cache_data(ttl=60)
+def load_monitor_alerts() -> dict[str, Any]:
+    """Load open monitoring alerts."""
+    api_key = os.getenv("REACT_DASHBOARD_API_KEY", "").strip()
+
+    if not api_key:
+        try:
+            api_key = str(st.secrets["REACT_DASHBOARD_API_KEY"]).strip()
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        raise RuntimeError("REACT_DASHBOARD_API_KEY is not configured.")
+
+    return _read_json(
+        MONITOR_ALERTS_URL,
+        api_key,
+    )
+
+@st.cache_data(ttl=60)
+def load_monitor_grid(
+    metric: str = "slots_covered",
+    phase: str = "all",
+) -> dict[str, Any]:
+    """Load the Stage 2 participant monitoring grid."""
+
+    api_key = os.getenv("REACT_DASHBOARD_API_KEY", "").strip()
+
+    if not api_key:
+        try:
+            api_key = str(st.secrets["REACT_DASHBOARD_API_KEY"]).strip()
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        raise RuntimeError(
+            "REACT_DASHBOARD_API_KEY is not configured."
+        )
+
+    url = (
+        f"{MONITOR_GRID_URL}"
+        f"?metric={metric}"
+        f"&phase={phase}"
+    )
+
+    return _read_json(url, api_key)
+
+@st.cache_data(ttl=60)
+def load_monitor_participant(user_id: int) -> dict[str, Any]:
+    """Load one participant's monitoring rollup, daily metrics, and alerts."""
+
+    api_key = os.getenv("REACT_DASHBOARD_API_KEY", "").strip()
+
+    if not api_key:
+        try:
+            api_key = str(st.secrets["REACT_DASHBOARD_API_KEY"]).strip()
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        raise RuntimeError(
+            "REACT_DASHBOARD_API_KEY is not configured."
+        )
+
+    url = f"{BACKEND_BASE_URL}/api/monitor/participant/{user_id}"
+
+    return _read_json(url, api_key)
+
+@st.cache_data(ttl=60)
+def load_monitor_timeline(
+    user_id: int,
+    local_date: Optional[str] = None,
+    days: int = 1,
+) -> dict[str, Any]:
+    """Load participant timeline data from the monitoring API."""
+
+    api_key = os.getenv("REACT_DASHBOARD_API_KEY", "").strip()
+
+    if not api_key:
+        try:
+            api_key = str(st.secrets["REACT_DASHBOARD_API_KEY"]).strip()
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        raise RuntimeError(
+            "REACT_DASHBOARD_API_KEY is not configured."
+        )
+
+    url = (
+        f"{BACKEND_BASE_URL}"
+        f"/api/monitor/participant/{user_id}/timeline"
+        f"?days={days}"
+    )
+
+    if local_date:
+        url += f"&date={local_date}"
+
+    return _read_json(url, api_key)
+
+
+@st.cache_data(ttl=60)
+def load_monitor_funnel(
+    user_id: int,
+) -> dict[str, Any]:
+    """Load one participant's whole-study delivery funnel."""
+
+    api_key = os.getenv("REACT_DASHBOARD_API_KEY", "").strip()
+
+    if not api_key:
+        try:
+            api_key = str(st.secrets["REACT_DASHBOARD_API_KEY"]).strip()
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        raise RuntimeError(
+            "REACT_DASHBOARD_API_KEY is not configured."
+        )
+
+    url = (
+        f"{BACKEND_BASE_URL}"
+        f"/api/monitor/participant/{user_id}/funnel"
+    )
+
+    return _read_json(url, api_key)
