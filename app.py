@@ -1446,6 +1446,7 @@ def render_daily_monitoring_view(
 
     participant_rows = []
     activity_rows = []
+    yesterday_participant_rows = []
 
     yesterday_completed = 0
     yesterday_scheduled = 0
@@ -1496,6 +1497,10 @@ def render_daily_monitoring_view(
             last_push = pd.NaT
             last_receipt = pd.NaT
 
+            participant_yesterday_delivered = 0
+            participant_yesterday_completed = 0
+            participant_yesterday_last = pd.NaT
+
             # Process yesterday + today
 
             for day in days:
@@ -1514,9 +1519,12 @@ def render_daily_monitoring_view(
 
                 # Number of scheduled slots yesterday
                 if day_date == yesterday:
-                    yesterday_scheduled += len(
+                    delivered_slots = len(
                         day.get("slots") or []
                     )
+
+                    yesterday_scheduled += delivered_slots
+                    participant_yesterday_delivered = delivered_slots
 
                 completed_slots = set()
 
@@ -1563,21 +1571,21 @@ def render_daily_monitoring_view(
                         # Yesterday EMA only counts completed
                         # scheduled check-ins.
                         if (
-                            day_date
-                            == yesterday
+                            day_date == yesterday
                             and completed
-                            and event.get(
-                                "ema_type"
-                            )
-                            == "scheduled_check_in"
-                            and event.get(
-                                "slot"
-                            )
-                            is not None
+                            and event.get("ema_type") == "scheduled_check_in"
+                            and event.get("slot") is not None
                         ):
                             completed_slots.add(
                                 event.get("slot")
                             )
+
+                            if pd.notna(event_time):
+                                if (
+                                    pd.isna(participant_yesterday_last)
+                                    or event_time > participant_yesterday_last
+                                ):
+                                    participant_yesterday_last = event_time
 
                     # DECISIONS
 
@@ -1727,9 +1735,23 @@ def render_daily_monitoring_view(
                 # Yesterday completed scheduled slots
 
                 if day_date == yesterday:
-                    yesterday_completed += len(
+                    completed_count = len(
                         completed_slots
                     )
+                    yesterday_completed += completed_count
+
+                    participant_yesterday_completed = (
+                        completed_count
+                    )
+
+            yesterday_participant_rows.append(
+                {
+                    "Participant": participant_id,
+                    "Completed": participant_yesterday_completed,
+                    "Delivered": participant_yesterday_delivered,
+                    "Last completed yesterday": participant_yesterday_last,
+                }
+            ) 
 
             # Participant stale state
             #
@@ -1781,6 +1803,10 @@ def render_daily_monitoring_view(
 
     activity = pd.DataFrame(
         activity_rows
+    )
+
+    yesterday_by_participant = pd.DataFrame(
+        yesterday_participant_rows
     )
 
     # Summary metrics
@@ -1866,6 +1892,59 @@ def render_daily_monitoring_view(
             f"{yesterday:%b %d}."
         ),
     )
+
+    st.markdown(
+        "#### Yesterday check-ins by participant"
+    )
+
+    if yesterday_by_participant.empty:
+
+        st.info(
+            "No participant-level check-in data "
+            "was returned for yesterday."
+        )
+
+    else:
+
+        yesterday_display = (
+            yesterday_by_participant.copy()
+        )
+
+        yesterday_display[
+            "Check-ins"
+        ] = (
+            yesterday_display["Completed"]
+            .astype(str)
+            + " / "
+            + yesterday_display["Delivered"]
+            .astype(str)
+        )
+
+        yesterday_display[
+            "Last completed yesterday"
+        ] = yesterday_display[
+            "Last completed yesterday"
+        ].apply(
+            lambda value: (
+                pd.Timestamp(value).strftime(
+                    "%I:%M:%S %p ET"
+                )
+                if pd.notna(value)
+                else "None"
+            )
+        )
+
+        st.dataframe(
+            yesterday_display[
+                [
+                    "Participant",
+                    "Check-ins",
+                    "Last completed yesterday",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
 
     # NEEDS ATTENTION
 
