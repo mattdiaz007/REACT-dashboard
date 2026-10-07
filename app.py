@@ -140,6 +140,69 @@ def filter_monitor_participants(
         not in DEMO_PARTICIPANT_OVERRIDES
     ]
 
+def study_id_group(value) -> str:
+    """Classify dashboard participant IDs."""
+    label = str(value or "").strip().upper()
+
+    if label.startswith("RS"):
+        return "RS"
+
+    if label.startswith("ST"):
+        return "ST"
+
+    return "OTHER"
+
+
+def parse_monitor_time(value):
+    """Convert backend timestamp to Eastern time."""
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+
+    if pd.isna(parsed):
+        return pd.NaT
+
+    return parsed.tz_convert(LOCAL_TIMEZONE)
+
+
+def timeline_days(payload: dict) -> list[dict]:
+    """Normalize one-day and multi-day timeline responses."""
+    if isinstance(payload.get("days"), list):
+        return payload["days"]
+
+    if payload.get("local_date"):
+        return [payload]
+
+    return []
+
+
+def decision_activity_reason(event: dict) -> str:
+    """Convert backend decision data into staff-facing reasons."""
+    suppression = str(
+        event.get("suppression_reason") or ""
+    ).strip().lower()
+
+    trigger = str(
+        event.get("trigger_reason") or ""
+    ).strip().lower()
+
+    if suppression == "run_in" or "run-in" in trigger:
+        return "Run in"
+
+    if suppression == "cooldown" or "cooldown" in trigger:
+        return "Cooldown"
+
+    if suppression == "daily_cap" or "daily cap" in trigger:
+        return "Cap"
+
+    if suppression.startswith("distress_") or "distress" in trigger:
+        return "Distress"
+
+    if bool(event.get("send_prompt")):
+        return "Sent"
+
+    if event.get("randomization_draw") is not None:
+        return "Lost the draw"
+
+    return "Not eligible"
 
 def to_eastern(series: pd.Series) -> pd.Series:
     """Parse timestamps as UTC and convert them to US Eastern time."""
@@ -1261,194 +1324,647 @@ def render_feasibility_view(log_df: pd.DataFrame, data_mode: str, include_demo_d
             """
         )
 
+def render_daily_monitoring_view(
+    log_df: pd.DataFrame,
+    data_mode: str,
+    include_demo_devices: bool,
+) -> None:
+    """Render the live morning monitoring screen for pilot operations."""
 
-def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str, include_demo_devices: bool) -> None:
-    """Render the single morning screen used to identify pilot issues quickly."""
     st.header("Daily Monitoring")
+
     st.caption(
-        "Morning operational check: data freshness, delivery health, yesterday's "
-        "EMA completion, and participants needing attention. Times are Eastern."
+        "Morning operational check: completed check-ins, prompt decisions, "
+        "delivery health, and participants needing attention. Times are Eastern."
     )
 
-    if data_mode == "Live":
-        st.success("LIVE DATA MODE — only live backend fields are displayed. Seed values are never substituted.")
-    else:
-        st.info("SEED DATA MODE — synthetic/mock data for testing and demonstration only.")
+    # Daily Monitoring should use real monitoring data in Live.
+
+    if data_mode != "Live":
+        st.info(
+            "SEED DATA MODE — Daily Monitoring operational status is intended "
+            "for the live monitoring API. Switch to Live mode for pilot status."
+        )
+        return
+
+    st.success(
+        "LIVE DATA MODE — monitoring API data only. "
+        "Seed values are never substituted."
+    )
+
+    now_et = pd.Timestamp.now(tz=LOCAL_TIMEZONE)
+
+    yesterday = (
+        now_et - pd.Timedelta(days=1)
+    ).date()
+
+    stale_cutoff = (
+        now_et - pd.Timedelta(hours=24)
+    )
+
+    # Load participant roster from monitoring API
 
     try:
-        source_df, source_name = load_pipeline_source(data_mode)
-        pipeline_df, _ = build_pipeline_data(source_df)
-        if data_mode == "Live":
-            pipeline_df = filter_demo_participants(
-                pipeline_df,
-                include_demo_devices=include_demo_devices,
-            )
-        load_error = None
+        roster_payload = load_monitor_grid(
+            metric="ema_scheduled_n",
+            phase="all",
+        )
+
+        roster_rows = filter_monitor_participants(
+            roster_payload.get("rows", []),
+            include_demo_devices,
+        )
+
     except Exception as exc:
-        if data_mode == "Live":
-            st.error("Live backend data could not be loaded. Seed data was not substituted.")
-            st.code(str(exc))
-            return
-        source_name = "seed decision-log fallback"
-        pipeline_df, _ = build_pipeline_data(log_df)
-        pipeline_df["data_source"] = source_name
-        pipeline_df["is_seed_data"] = True
-        load_error = str(exc)
-
-    is_seed_source = bool(
-        "is_seed_data" in pipeline_df.columns
-        and pipeline_df["is_seed_data"].fillna(False).astype(bool).any()
-    )
-    if is_seed_source:
-        st.info(
-            "SEED DATA MODE — use this screen to test layout only. Stale counts and "
-            "operational alerts are intentionally disabled."
+        st.error(
+            "Live monitoring data could not be loaded."
         )
-    else:
-        st.success(f"LIVE DATA MODE — source: {source_name}")
+        st.code(str(exc))
+        return
 
-    if load_error:
-        st.warning("The live monitoring source could not be loaded.")
-        st.code(load_error)
+    # Build one participant record per user
 
-    participant_column = "participant_id" if "participant_id" in pipeline_df.columns else "user_id"
-    now_et = pd.Timestamp.now(tz=LOCAL_TIMEZONE)
-    yesterday = (now_et - pd.Timedelta(days=1)).date()
-    stale_cutoff = now_et - pd.Timedelta(hours=24)
+    roster = []
+    seen_users = set()
 
-    health = (
-        pipeline_df.groupby(participant_column, as_index=False)
-        .agg(
-            last_sync=("last_sync_at", "max"),
-            last_push=("push_sent_at", "max"),
-            last_receipt=("device_received_at", "max"),
-            last_backend_receipt=("receipt_reported_at", "max"),
-        )
-    ) if participant_column in pipeline_df.columns else pd.DataFrame()
+    for row in roster_rows:
 
-    if not health.empty:
-        health["stale"] = False if is_seed_source else (
-            health["last_sync"].isna() | health["last_sync"].lt(stale_cutoff)
+        user_id = row.get("user_id")
+
+        participant_id = str(
+            row.get("participant_id") or ""
+        ).strip().upper()
+
+        if user_id is None:
+            continue
+
+        if user_id in seen_users:
+            continue
+
+        seen_users.add(user_id)
+
+        roster.append(
+            {
+                "user_id": user_id,
+                "participant_id": participant_id,
+                "group": study_id_group(
+                    participant_id
+                ),
+            }
         )
 
-        # Determine waiting status from each participant's latest delivery event.
-        # This prevents an older receipt from masking a newer unreceived push.
-        latest_events = pipeline_df.copy()
-        latest_events["_event_sort_time"] = latest_events["push_sent_at"].fillna(
-            latest_events["decision_made_at"]
-        )
-        latest_events = (
-            latest_events.sort_values(
-                [participant_column, "_event_sort_time"],
-                ascending=[True, True],
-                na_position="first",
+    # Study groups
+    #
+    # RS = actual pilot participants
+    # ST = staff/test accounts shown separately
+    # OTHER = numeric/non-study accounts excluded
+
+    rs_roster = [
+        row
+        for row in roster
+        if row["group"] == "RS"
+    ]
+
+    st_roster = [
+        row
+        for row in roster
+        if row["group"] == "ST"
+    ]
+
+    other_roster = [
+        row
+        for row in roster
+        if row["group"] == "OTHER"
+    ]
+
+    # Pull two-day timeline for each RS participant.
+    #
+    # Two days gives us:
+    # - last 24h completed-check-in status
+    # - yesterday EMA completion
+    # - recent decision activity
+
+    participant_rows = []
+    activity_rows = []
+
+    yesterday_completed = 0
+    yesterday_scheduled = 0
+
+    with st.spinner(
+        "Loading participant check-ins and decision activity..."
+    ):
+
+        for participant in rs_roster:
+
+            user_id = participant["user_id"]
+
+            participant_id = participant[
+                "participant_id"
+            ]
+
+            try:
+                timeline = load_monitor_timeline(
+                    user_id=user_id,
+                    local_date=(
+                        now_et.date().isoformat()
+                    ),
+                    days=2,
+                )
+
+            except Exception as exc:
+
+                participant_rows.append(
+                    {
+                        "Participant": participant_id,
+                        "Last completed check-in": pd.NaT,
+                        "Stale": True,
+                        "Waiting": False,
+                        "Last push": pd.NaT,
+                        "Last receipt": pd.NaT,
+                        "Load error": str(exc),
+                    }
+                )
+
+                continue
+
+            days = timeline_days(timeline)
+
+            completed_checkins = []
+
+            waiting_for_receipt = False
+
+            last_push = pd.NaT
+            last_receipt = pd.NaT
+
+            # Process yesterday + today
+
+            for day in days:
+
+                raw_day_date = pd.to_datetime(
+                    day.get("local_date"),
+                    errors="coerce",
+                )
+
+                if pd.isna(raw_day_date):
+                    day_date = None
+                else:
+                    day_date = (
+                        raw_day_date.date()
+                    )
+
+                # Number of scheduled slots yesterday
+                if day_date == yesterday:
+                    yesterday_scheduled += len(
+                        day.get("slots") or []
+                    )
+
+                completed_slots = set()
+
+                # Events
+
+                for event in day.get(
+                    "events",
+                    [],
+                ):
+
+                    event_kind = event.get(
+                        "kind"
+                    )
+
+                    # CHECK-INS
+
+                    if event_kind == "ema":
+
+                        event_time = (
+                            parse_monitor_time(
+                                event.get("at")
+                            )
+                        )
+
+                        completed = (
+                            str(
+                                event.get(
+                                    "status"
+                                )
+                                or ""
+                            ).lower()
+                            == "completed"
+                        )
+
+                        if (
+                            completed
+                            and event.get("ema_type") == "scheduled_check_in"
+                            and pd.notna(event_time)
+                        ):
+                            completed_checkins.append(
+                                event_time
+                            )
+
+                        # Yesterday EMA only counts completed
+                        # scheduled check-ins.
+                        if (
+                            day_date
+                            == yesterday
+                            and completed
+                            and event.get(
+                                "ema_type"
+                            )
+                            == "scheduled_check_in"
+                            and event.get(
+                                "slot"
+                            )
+                            is not None
+                        ):
+                            completed_slots.add(
+                                event.get("slot")
+                            )
+
+                    # DECISIONS
+
+                    if event_kind != "decision":
+                        continue
+
+                    decision_time = (
+                        parse_monitor_time(
+                            event.get("at")
+                        )
+                    )
+
+                    push_time = (
+                        parse_monitor_time(
+                            event.get(
+                                "push_sent_at"
+                            )
+                        )
+                    )
+
+                    receipt_time = (
+                        parse_monitor_time(
+                            event.get(
+                                "device_received_at"
+                            )
+                        )
+                    )
+
+                    send_prompt = bool(
+                        event.get(
+                            "send_prompt"
+                        )
+                    )
+
+                    delivery_error = str(
+                        event.get(
+                            "delivery_error"
+                        )
+                        or ""
+                    ).strip()
+
+                    # Track latest actual push
+                    if pd.notna(push_time):
+
+                        if (
+                            pd.isna(last_push)
+                            or push_time
+                            > last_push
+                        ):
+                            last_push = (
+                                push_time
+                            )
+
+                    # Track latest actual receipt
+                    if pd.notna(
+                        receipt_time
+                    ):
+
+                        if (
+                            pd.isna(
+                                last_receipt
+                            )
+                            or receipt_time
+                            > last_receipt
+                        ):
+                            last_receipt = (
+                                receipt_time
+                            )
+
+                    # A participant is only "waiting" if a
+                    # push was ACTUALLY sent.
+                    if (
+                        send_prompt
+                        and pd.notna(
+                            push_time
+                        )
+                        and pd.isna(
+                            receipt_time
+                        )
+                    ):
+                        waiting_for_receipt = (
+                            True
+                        )
+
+                    # Delivery state
+
+                    if delivery_error:
+
+                        delivery = "Error"
+
+                    elif not send_prompt:
+
+                        delivery = "Not sent"
+
+                    elif pd.notna(
+                        receipt_time
+                    ):
+
+                        delivery = "Received"
+
+                    elif pd.notna(
+                        push_time
+                    ):
+
+                        delivery = (
+                            "Waiting for receipt"
+                        )
+
+                    else:
+
+                        # IMPORTANT:
+                        # Only a decision that was actually
+                        # selected to send can be waiting for
+                        # a push.
+                        delivery = (
+                            "Waiting for push"
+                        )
+
+                    activity_rows.append(
+                        {
+                            "Participant": (
+                                participant_id
+                            ),
+                            "Decision made": (
+                                decision_time
+                            ),
+                            "Reason": (
+                                decision_activity_reason(
+                                    event
+                                )
+                            ),
+                            "Push sent": (
+                                push_time
+                            ),
+                            "Device received": (
+                                receipt_time
+                            ),
+                            "Delivery": (
+                                delivery
+                            ),
+                            "Error": (
+                                delivery_error
+                            ),
+                        }
+                    )
+
+                # Yesterday completed scheduled slots
+
+                if day_date == yesterday:
+                    yesterday_completed += len(
+                        completed_slots
+                    )
+
+            # Participant stale state
+            #
+            # IMPORTANT:
+            # This is now based on COMPLETED check-ins,
+            # not wearable sync.
+
+            last_completed = (
+                max(completed_checkins)
+                if completed_checkins
+                else pd.NaT
             )
-            .groupby(participant_column, as_index=False)
-            .tail(1)
-        )
-        latest_events = latest_events[[
-            participant_column, "push_sent_at", "device_received_at"
-        ]].copy()
-        latest_events["waiting"] = (
-            latest_events["push_sent_at"].notna()
-            & latest_events["device_received_at"].isna()
-        )
-        health = health.merge(
-            latest_events[[participant_column, "waiting"]],
-            on=participant_column,
-            how="left",
-        )
-        health["waiting"] = health["waiting"].fillna(False).astype(bool)
-    active_participants = int(health[participant_column].nunique()) if not health.empty else 0
-    stale_count = 0 if is_seed_source or health.empty else int(health["stale"].sum())
-    waiting_count = int(health["waiting"].sum()) if not health.empty else 0
-    error_count = int((pipeline_df["pipeline_state"] == "Error").sum())
 
-    if data_mode == "Seed":
-        feasibility = log_df.dropna(subset=["user_id", "timestamp"]).copy()
-        feasibility["local_date"] = feasibility["timestamp"].dt.date
-        feasibility["ema_completed"] = feasibility["ema"].notna() if "ema" in feasibility else False
-        yesterday_rows = feasibility[feasibility["local_date"] == yesterday]
-        yesterday_scheduled = len(yesterday_rows)
-        yesterday_completed = int(yesterday_rows["ema_completed"].sum()) if yesterday_scheduled else 0
-        yesterday_rate = yesterday_completed / yesterday_scheduled if yesterday_scheduled else None
+            is_stale = (
+                pd.isna(last_completed)
+                or last_completed
+                < stale_cutoff
+            )
+
+            participant_rows.append(
+                {
+                    "Participant": (
+                        participant_id
+                    ),
+                    "Last completed check-in": (
+                        last_completed
+                    ),
+                    "Stale": (
+                        is_stale
+                    ),
+                    "Waiting": (
+                        waiting_for_receipt
+                    ),
+                    "Last push": (
+                        last_push
+                    ),
+                    "Last receipt": (
+                        last_receipt
+                    ),
+                    "Load error": "",
+                }
+            )
+
+    # Convert monitoring results to DataFrames
+
+    health = pd.DataFrame(
+        participant_rows
+    )
+
+    activity = pd.DataFrame(
+        activity_rows
+    )
+
+    # Summary metrics
+
+    active_participants = len(
+        rs_roster
+    )
+
+    stale_count = (
+        int(
+            health["Stale"].sum()
+        )
+        if not health.empty
+        else 0
+    )
+
+    waiting_count = (
+        int(
+            health["Waiting"].sum()
+        )
+        if not health.empty
+        else 0
+    )
+
+    if not activity.empty:
+
+        error_count = int(
+            activity["Error"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .ne("")
+            .sum()
+        )
+
     else:
-        yesterday_rows = pd.DataFrame()
-        yesterday_scheduled = 0
-        yesterday_completed = 0
-        yesterday_rate = None
+
+        error_count = 0
+
+    yesterday_rate = (
+        yesterday_completed
+        / yesterday_scheduled
+        if yesterday_scheduled
+        else None
+    )
+
+    # Top metric cards
 
     metrics = st.columns(5)
-    metrics[0].metric("Participants", active_participants)
-    metrics[1].metric("Stale >24h", "Disabled" if is_seed_source else stale_count)
-    metrics[2].metric("Waiting receipts", waiting_count)
-    metrics[3].metric("Pipeline errors", error_count)
-    metrics[4].metric(
-        "Yesterday EMA",
-        (f"{yesterday_rate:.0%}" if yesterday_rate is not None else "No rows")
-        if data_mode == "Seed" else "Not live yet",
-        help=(
-            f"{yesterday_completed} completed of {yesterday_scheduled} scheduled on {yesterday:%b %d}."
-            if data_mode == "Seed"
-            else "EMA completion is not yet supplied by the live backend, so seed EMA data is not shown in Live mode."
-        )
+
+    metrics[0].metric(
+        "RS participants",
+        active_participants,
     )
 
-    st.markdown("#### Needs attention")
+    metrics[1].metric(
+        "No check-in >24h",
+        stale_count,
+    )
+
+    metrics[2].metric(
+        "Waiting receipts",
+        waiting_count,
+    )
+
+    metrics[3].metric(
+        "Pipeline errors",
+        error_count,
+    )
+
+    metrics[4].metric(
+        "Yesterday EMA",
+        (
+            f"{yesterday_rate:.0%}"
+            if yesterday_rate
+            is not None
+            else "No scheduled rows"
+        ),
+        help=(
+            f"{yesterday_completed} completed "
+            f"of {yesterday_scheduled} scheduled "
+            f"check-ins on "
+            f"{yesterday:%b %d}."
+        ),
+    )
+
+    # NEEDS ATTENTION
+
+    st.markdown(
+        "#### Needs attention"
+    )
+
     attention_rows = []
+
     if not health.empty:
+
         for _, row in health.iterrows():
+
             reasons = []
-            if not is_seed_source and row["stale"]:
-                reasons.append("No sync in 24h")
-            if row["waiting"]:
-                reasons.append("Push waiting for receipt")
+
+            if bool(row["Stale"]):
+
+                reasons.append(
+                    "No completed check-in in 24h"
+                )
+
+            if bool(row["Waiting"]):
+
+                reasons.append(
+                    "Sent prompt waiting for receipt"
+                )
+
+            if row.get("Load error"):
+
+                reasons.append(
+                    "Monitoring data could not be loaded"
+                )
+
             if reasons:
-                participant_value = str(row[participant_column])
-                attention_rows.append({
-                    "Participant": (
-                        f"{participant_value} — {DEMO_PARTICIPANTS[participant_value]}"
-                        if participant_value in DEMO_PARTICIPANTS
-                        else participant_value
-                    ),
-                    "Reason": "; ".join(reasons),
-                    "Last sync": row["last_sync"],
-                    "Last push": row["last_push"],
-                    "Last receipt": row["last_receipt"],
-                })
 
-    participant_yesterday = (
-        yesterday_rows.groupby("user_id")
-        .agg(Scheduled=("ema_completed", "size"), Completed=("ema_completed", "sum"))
-        .reset_index()
-    ) if data_mode == "Seed" and not yesterday_rows.empty else pd.DataFrame()
-    if not participant_yesterday.empty:
-        participant_yesterday["Rate"] = participant_yesterday["Completed"] / participant_yesterday["Scheduled"]
-        for _, row in participant_yesterday[participant_yesterday["Rate"] < 0.5].iterrows():
-            attention_rows.append({
-                "Participant": row["user_id"],
-                "Reason": f"Yesterday EMA completion {row['Rate']:.0%}",
-                "Last sync": pd.NaT,
-                "Last push": pd.NaT,
-                "Last receipt": pd.NaT,
-            })
+                attention_rows.append(
+                    {
+                        "Participant": (
+                            row["Participant"]
+                        ),
+                        "Reason": (
+                            "; ".join(
+                                reasons
+                            )
+                        ),
+                        "Last completed check-in": (
+                            row[
+                                "Last completed check-in"
+                            ]
+                        ),
+                        "Last push": (
+                            row["Last push"]
+                        ),
+                        "Last receipt": (
+                            row[
+                                "Last receipt"
+                            ]
+                        ),
+                    }
+                )
 
-    attention_df = pd.DataFrame(attention_rows)
+    attention_df = pd.DataFrame(
+        attention_rows
+    )
 
     if attention_df.empty:
-        st.success("No participants currently meet the dashboard's attention rules.")
-    else:
-        attention_display = attention_df.copy()
 
-        for column in ["Last sync", "Last push", "Last receipt"]:
-            if column in attention_display.columns:
-                attention_display[column] = attention_display[column].apply(
-                    lambda value: (
-                        pd.Timestamp(value).strftime("%b %d, %I:%M:%S %p ET")
-                        if pd.notna(value)
-                        else "Not recorded"
+        st.success(
+            "No RS participants currently meet "
+            "the dashboard's attention rules."
+        )
+
+    else:
+
+        attention_display = (
+            attention_df.copy()
+        )
+
+        for column in [
+            "Last completed check-in",
+            "Last push",
+            "Last receipt",
+        ]:
+
+            attention_display[
+                column
+            ] = attention_display[
+                column
+            ].apply(
+                lambda value: (
+                    pd.Timestamp(
+                        value
+                    ).strftime(
+                        "%b %d, %I:%M:%S %p ET"
                     )
+                    if pd.notna(value)
+                    else "Not recorded"
                 )
+            )
 
         st.dataframe(
             attention_display,
@@ -1456,66 +1972,109 @@ def render_daily_monitoring_view(log_df: pd.DataFrame, data_mode: str, include_d
             hide_index=True,
         )
 
-    st.markdown("#### Latest operational activity")
+    # DECISION ACTIVITY
 
-    recent = pipeline_df.sort_values(
-        "decision_made_at",
-        ascending=False,
-        na_position="last",
-    ).head(20)
+    st.markdown(
+        "#### Latest decision activity"
+    )
 
-    recent_columns = [
-        c
-        for c in [
-            participant_column,
-            "decision_made_at",
-            "push_sent_at",
-            "device_received_at",
-            "pipeline_state",
-        ]
-        if c in recent.columns
-    ]
+    if activity.empty:
 
-    recent_display = recent[recent_columns].copy()
-
-    if participant_column in recent_display.columns:
-        recent_display[participant_column] = recent_display[participant_column].astype(str).map(
-            lambda participant_id: (
-                f"{participant_id} — {DEMO_PARTICIPANTS[participant_id]}"
-                if participant_id in DEMO_PARTICIPANTS
-                else participant_id
-            )
+        st.info(
+            "No recent decision activity "
+            "was returned for RS participants."
         )
 
-    for column in [
-        "decision_made_at",
-        "push_sent_at",
-        "device_received_at",
-    ]:
-        if column in recent_display.columns:
-            recent_display[column] = recent_display[column].apply(
+    else:
+
+        recent = (
+            activity.sort_values(
+                "Decision made",
+                ascending=False,
+                na_position="last",
+            )
+            .head(30)
+            .copy()
+        )
+
+        for column in [
+            "Decision made",
+            "Push sent",
+            "Device received",
+        ]:
+
+            recent[column] = recent[
+                column
+            ].apply(
                 lambda value: (
-                    pd.Timestamp(value).strftime("%b %d, %I:%M:%S %p ET")
+                    pd.Timestamp(
+                        value
+                    ).strftime(
+                        "%b %d, %I:%M:%S %p ET"
+                    )
                     if pd.notna(value)
-                    else "Not recorded"
+                    else "—"
                 )
             )
 
-    recent_display = recent_display.rename(
-        columns={
-            participant_column: "Participant",
-            "decision_made_at": "Decision made",
-            "push_sent_at": "Push sent",
-            "device_received_at": "Device received",
-            "pipeline_state": "Status",
-        }
+        st.dataframe(
+            recent[
+                [
+                    "Participant",
+                    "Decision made",
+                    "Reason",
+                    "Push sent",
+                    "Device received",
+                    "Delivery",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ST ACCOUNTS
+
+    st.markdown(
+        "#### ST accounts"
     )
 
-    st.dataframe(
-        recent_display,
-        use_container_width=True,
-        hide_index=True,
-    )
+    if st_roster:
+
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Participant": (
+                            row[
+                                "participant_id"
+                            ]
+                        )
+                    }
+                    for row
+                    in st_roster
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    else:
+
+        st.caption(
+            "No ST study IDs were returned "
+            "by the monitoring API."
+        )
+
+    # Explain filtered accounts without displaying their IDs.
+
+    if other_roster:
+
+        st.caption(
+            f"{len(other_roster)} non-study "
+            "account(s) were excluded because "
+            "their participant ID does not "
+            "begin with RS."
+        )
 
 
 def render_weekly_summary_view(log_df, data_mode, include_demo_devices):
