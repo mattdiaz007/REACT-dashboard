@@ -261,6 +261,29 @@ def load_monitor_alerts() -> dict[str, Any]:
     )
 
 @st.cache_data(ttl=60)
+def load_participant_status() -> list[dict[str, Any]]:
+    """Load participant push-token presence from the backend."""
+
+    api_key = os.getenv(
+        "REACT_DASHBOARD_API_KEY", ""
+    ).strip()
+
+    if not api_key:
+        try:
+            api_key = str(
+                st.secrets["REACT_DASHBOARD_API_KEY"]
+            ).strip()
+        except Exception:
+            api_key = ""
+
+    if not api_key:
+        raise RuntimeError(
+            "REACT_DASHBOARD_API_KEY is not configured."
+        )
+
+    return _read_json(PARTICIPANTS_URL, api_key)
+
+@st.cache_data(ttl=60)
 def load_monitor_grid(
     metric: str = "slots_covered",
     phase: str = "all",

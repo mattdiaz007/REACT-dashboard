@@ -1,0 +1,1 @@
+"""REACT dashboard page views."""
