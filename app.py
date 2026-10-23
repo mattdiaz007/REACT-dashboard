@@ -2,6 +2,8 @@
 
 import pandas as pd
 import streamlit as st
+import os
+import hmac
 
 st.set_page_config(
     page_title="REACT Decision Dashboard",
@@ -25,6 +27,39 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def require_login():
+    """Keep dashboard views and live API calls behind a shared team password."""
+    password_config = os.getenv("DASHBOARD_PASSWORD", "")
+    if not password_config:
+        try:
+            password_config = str(st.secrets.get("DASHBOARD_PASSWORD", ""))
+        except (FileNotFoundError, KeyError):
+            password_config = ""
+
+    if not password_config:
+        st.error("Dashboard access is not configured. Set DASHBOARD_PASSWORD in Heroku Config Vars.")
+        st.stop()
+
+    if st.session_state.get("react_authenticated", False):
+        return
+
+    st.title("REACT Research Dashboard")
+    st.subheader("Team Login")
+    with st.form("react_login_form"):
+        entered_password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Log In")
+
+    if submitted:
+        if hmac.compare_digest(entered_password, password_config):
+            st.session_state["react_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+
+require_login()
+
 
 
 from dashboard_core import load_default_data, clean_data, build_consistency_table
@@ -40,6 +75,10 @@ from views.participant_timeline import render_participant_timeline_view
 
 # Sidebar data selection
 st.sidebar.header("Data mode")
+
+if st.sidebar.button("Log Out"):
+    st.session_state["react_authenticated"] = False
+    st.rerun()
 
 data_mode = st.sidebar.radio(
     "Choose dashboard source",
